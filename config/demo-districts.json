@@ -1,0 +1,15 @@
+[
+  { "district": "Pune", "stateCode": 27, "districtCode": 521, "status": "verified" },
+  { "district": "Amravati", "stateCode": 27, "districtCode": 503, "status": "verified" },
+  { "district": "Latur", "stateCode": 27, "districtCode": 524, "status": "verified" },
+  { "district": "Ahmednagar / Ahilyanagar", "stateCode": 27, "districtCode": 522, "status": "candidate" },
+  { "district": "Akola", "stateCode": 27, "districtCode": 501, "status": "candidate" },
+  { "district": "Kolhapur", "stateCode": 27, "districtCode": 530, "status": "candidate" },
+  { "district": "Mumbai", "stateCode": 27, "districtCode": 519, "status": "candidate" },
+  { "district": "Nagpur", "stateCode": 27, "districtCode": 505, "status": "candidate" },
+  { "district": "Sangli", "stateCode": 27, "districtCode": 531, "status": "candidate" },
+  { "district": "Satara", "stateCode": 27, "districtCode": 527, "status": "candidate" },
+  { "district": "Solapur", "stateCode": 27, "districtCode": 526, "status": "candidate" },
+  { "district": "Nashik", "stateCode": 27, "districtCode": 516, "status": "candidate" },
+  { "district": "Chhatrapati Sambhajinagar", "stateCode": 27, "districtCode": 515, "status": "candidate" }
+]
