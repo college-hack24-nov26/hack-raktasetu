@@ -1,0 +1,40 @@
+{
+  "name": "@raktasetu/api",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "test": "tsx src/test-api.ts",
+    "test:phase2": "tsx src/test-phase2-identity-rbac.ts",
+    "test:phase3": "tsx src/test-phase3-camp-operations.ts",
+    "test:phase4": "tsx src/test-phase4-traceability.ts",
+    "test:phase5": "tsx src/test-phase5-handover.ts",
+    "test:phase6": "tsx src/test-phase6-processing-release-inventory.ts",
+    "test:phase6:hardening": "tsx src/test-phase6-safety-hardening.ts",
+    "test:phase7": "tsx src/test-phase7-realtime-delivery.ts",
+    "test:phase8": "tsx src/test-phase8-patient-search.ts",
+    "test:phase9": "tsx src/test-phase9-hospital-disposition.ts",
+    "test:scenario3": "tsx src/test-platform-admin-application-review.ts",
+    "seed:demo": "tsx src/seed-demo.ts",
+    "cleanup:demo": "tsx src/cleanup-demo.ts",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.4.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^20.17.19",
+    "@types/ws": "^8.18.2",
+    "prisma": "^6.4.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}

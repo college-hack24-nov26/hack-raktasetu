@@ -1,0 +1,1387 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ----------------------------------------------------
+// Enums
+// ----------------------------------------------------
+
+enum Role {
+  USER
+  DONOR
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  DEACTIVATED
+  SUSPENDED
+}
+
+enum BloodGroup {
+  A_POS   // A+
+  A_NEG   // A-
+  B_POS   // B+
+  B_NEG   // B-
+  AB_POS  // AB+
+  AB_NEG  // AB-
+  O_POS   // O+
+  O_NEG   // O-
+}
+
+enum SearchScope {
+  EXACT_CENTRE
+  DISTRICT_EXPANDED
+  OUT_OF_DISTRICT
+}
+
+enum RequestStatus {
+  OPEN
+  CLOSED
+  CANCELLED
+  EXPIRED
+}
+
+enum ResponseStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  CANCELLED
+  EXPIRED
+}
+
+// ----------------------------------------------------
+// User & Account Management
+// ----------------------------------------------------
+
+model User {
+  id             String          @id @default(uuid())
+  phoneNumber    String          @unique // E.164 normalized format, strictly private
+  name           String?         // Display name
+  role           Role            @default(USER)
+  status         UserStatus      @default(ACTIVE)
+  deactivatedAt  DateTime?       // Soft deactivation timestamp
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  donorProfile   DonorProfile?
+  createdRequests BloodRequest[]
+  auditLogs      AuditLog[]
+  sessions       Session[]
+  memberships    OrganisationMembership[]
+  submittedApplications OrganisationApplication[]
+  campAttendances       CampAttendance[]
+  clinicalScreenings    ClinicalScreening[]
+  donationEvents        DonationEvent[]
+  collectedUnits        CollectionUnit[]        @relation("CollectedBy")
+  derivedComponents     ComponentUnit[]         @relation("DerivedBy")
+  unitStatusHistories   UnitStatusHistory[]     @relation("ActorUser")
+  createdManifests      HandoverManifest[]      @relation("CreatedManifests")
+  finalisedManifests    HandoverManifest[]      @relation("FinalisedManifests")
+  dispatchedManifests   HandoverManifest[]      @relation("DispatchedManifests")
+  reconciledManifests   HandoverManifest[]      @relation("ReconciledManifests")
+  verifiedHandoverItems HandoverItem[]          @relation("VerifiedHandoverItems")
+  resolvedExceptions    ReconciliationException[] @relation("ResolvedExceptions")
+  performedLaboratoryTests LaboratoryTestRecord[] @relation("PerformedTests")
+  verifiedLaboratoryTests  LaboratoryTestRecord[] @relation("VerifiedTests")
+  authorizedClinicalReleases ClinicalReleaseRecord[] @relation("AuthorizedReleases")
+  storageMovements       StorageMovementRecord[] @relation("MovedBy")
+  authorisedHospitalOrders HospitalIssueOrder[] @relation("AuthorisedHospitalOrders")
+  dispatchedHospitalOrders HospitalIssueOrder[] @relation("DispatchedHospitalOrders")
+  receivedHospitalOrders   HospitalIssueOrder[] @relation("ReceivedHospitalOrders")
+  verifiedHospitalItems    HospitalIssueItem[]  @relation("VerifiedHospitalItems")
+  reportedHospitalDiscrepancies HospitalDiscrepancy[] @relation("ReportedHospitalDiscrepancies")
+  resolvedHospitalDiscrepancies HospitalDiscrepancy[] @relation("ResolvedHospitalDiscrepancies")
+  recordedDispositions     ComponentDispositionRecord[] @relation("RecordedDispositions")
+  campStaffAssignments     CampStaffAssignment[]
+  createdCamps          Camp[]                  @relation("CreatedCamps")
+  approvedCamps         Camp[]                  @relation("ApprovedCamps")
+
+  @@index([phoneNumber])
+  @@index([role, status])
+  @@map("users")
+}
+
+// ----------------------------------------------------
+// Blood Centre Directory (Source of Truth: e-RaktKosh)
+// ----------------------------------------------------
+
+model BloodCentre {
+  hospitalCode   String          @id // Canonical external centre ID (string)
+  hospitalName   String
+  mobileNo       String?         // Contact phone (null if external value is "0" or missing)
+  address        String?
+  stateCode      Int             @default(27) // Maharashtra = 27
+  districtCode   Int?            // e-RaktKosh district ID/code
+  lastFetchedAt  DateTime?       // When directory data was last synced
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  primaryForDonors DonorProfile[]        @relation("PrimaryCentre")
+  preferredBy      DonorCentrePreference[]
+  snapshots        BloodAvailabilitySnapshot[]
+  requests         BloodRequest[]
+  verifiedOrganisations Organisation[]
+  associatedCamps  Camp[]
+
+  @@index([stateCode, districtCode])
+  @@index([hospitalName])
+  @@map("blood_centres")
+}
+
+// ----------------------------------------------------
+// Time-stamped External Availability Snapshots
+// Decoupled from Centre Directory; never treated as permanent
+// ----------------------------------------------------
+
+model BloodAvailabilitySnapshot {
+  id                String       @id @default(uuid())
+  hospitalCode      String
+  bloodCentre       BloodCentre  @relation(fields: [hospitalCode], references: [hospitalCode], onDelete: Cascade)
+  component         String       // e.g. "Packed Red Blood Cells"
+  bloodGroup        String?      // e.g. "B+Ve"
+  rawStockString    String?      // Exact external string e.g. "B+Ve : 129"
+  reportedQuantity  Int?         // Safely parsed integer count, null if unparseable
+  quantityUnit      String?      // Preserved as null unless verified from source
+  sourceEntryDate   DateTime?    // The external portal's stock entry timestamp (entrydate)
+  retrievedAt       DateTime     @default(now()) // When RaktaSetu retrieved the snapshot
+  isStale           Boolean      @default(false)
+  rawMetadata       Json?        // Additional raw payload for debugging and audit
+
+  @@index([hospitalCode, component])
+  @@index([retrievedAt])
+  @@map("blood_availability_snapshots")
+}
+
+// ----------------------------------------------------
+// Voluntary Donor Profile & Search Participation
+// ----------------------------------------------------
+
+model DonorProfile {
+  id                 String       @id @default(uuid())
+  userId             String       @unique
+  user               User         @relation(fields: [userId], references: [id], onDelete: Restrict)
+  fullName           String?      // Donor's display / full name
+  dateOfBirth        DateTime?    // Must be between 18 and 65 years for standard eligibility
+  bloodGroup         BloodGroup
+  stateCode          Int          @default(27)
+  districtCode       Int
+  cityOrLocality     String?      // Local city, town, or neighborhood
+  lastDonationDate   DateTime?    // Self-reported; does NOT guarantee medical clearance
+  verifiedLastDonationDate DateTime? // Verified donation timestamp from authorized facility/process
+
+  // Availability & Search Controls
+  isAvailable        Boolean      @default(true)  // Active availability toggle
+  isSearchable       Boolean      @default(false) // Mandatory explicit opt-in for searches
+
+  // Privacy & Consent Governance
+  consentVersion     String?      // Policy version accepted by donor
+  consentGrantedAt   DateTime?    // Timestamp when search opt-in was recorded
+  consentWithdrawnAt DateTime?    // Timestamp if donor withdraws from searches
+
+  // Database-enforced single primary centre
+  primaryHospitalCode String?
+  primaryCentre       BloodCentre? @relation("PrimaryCentre", fields: [primaryHospitalCode], references: [hospitalCode], onDelete: SetNull)
+
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  centrePreferences  DonorCentrePreference[]
+  receivedResponses  DonorResponse[]
+  campAttendances    CampAttendance[]
+
+  @@index([isSearchable, isAvailable, bloodGroup, districtCode])
+  @@index([primaryHospitalCode])
+  @@map("donor_profiles")
+}
+
+// ----------------------------------------------------
+// Relational Donor-to-Centre Preferences
+// ----------------------------------------------------
+
+model DonorCentrePreference {
+  id           String       @id @default(uuid())
+  donorId      String
+  donor        DonorProfile @relation(fields: [donorId], references: [id], onDelete: Cascade)
+  hospitalCode String
+  bloodCentre  BloodCentre  @relation(fields: [hospitalCode], references: [hospitalCode], onDelete: Restrict)
+  isPrimary    Boolean      @default(false)
+  createdAt    DateTime     @default(now())
+
+  @@unique([donorId, hospitalCode]) // Prevents duplicate centre associations
+  @@index([hospitalCode, isPrimary])
+  @@map("donor_centre_preferences")
+}
+
+// ----------------------------------------------------
+// Patient Donation Request (Initiated by User)
+// ----------------------------------------------------
+
+model BloodRequest {
+  id             String          @id @default(uuid())
+  requesterId    String
+  requester      User            @relation(fields: [requesterId], references: [id], onDelete: Restrict)
+  patientName    String?         // Patient display name (if different from requester)
+  bloodGroup     BloodGroup
+  component      String          // e.g. "Packed Red Blood Cells"
+  unitsRequested Int             @default(1) // Positive integer enforced by application & schema
+  requiredBy     DateTime?       // Urgency deadline
+  hospitalCode   String?         // Target centre where patient is admitted
+  bloodCentre    BloodCentre?    @relation(fields: [hospitalCode], references: [hospitalCode], onDelete: SetNull)
+  searchScope    SearchScope     @default(EXACT_CENTRE)
+  message        String?         // Non-sensitive request note
+  status         RequestStatus   @default(OPEN)
+  
+  // Phase 5 & 6: Closure, Reported vs. Verified Donation Lifecycle
+  closureOutcome         String? // Outcome category: DONATION_COMPLETED, ARRANGED_ELSEWHERE, NO_LONGER_NEEDED, DONOR_UNAVAILABLE, OTHER
+  closureFeedback        String? // Optional closure feedback/note
+  closureReportedBy      String? // User ID who submitted closure
+  reportedDonationStatus String? // "REPORTED_UNVERIFIED" | "VERIFIED" | "NOT_COMPLETED" | "NONE"
+  reportedDonorId        String? // Donor ID reported as having donated
+  donationVerifiedAt     DateTime? // Timestamp when verified by authorized verifier (null if unverified)
+  verifiedBy             String? // Verification actor/system ID (null if unverified)
+
+  closedAt       DateTime?       // When request was fulfilled, cancelled, or closed
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  recipientResponses DonorResponse[]
+  hospitalIssueOrders HospitalIssueOrder[] @relation("HospitalIssueOrders")
+
+  @@index([status, bloodGroup])
+  @@index([requesterId])
+  @@map("blood_requests")
+}
+
+// ----------------------------------------------------
+// Independent Donor Recipient Responses
+// One donor accepting never affects or accepts for other recipients
+// ----------------------------------------------------
+
+model DonorResponse {
+  id                    String         @id @default(uuid())
+  requestId             String
+  request               BloodRequest   @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  donorId               String
+  donor                 DonorProfile   @relation(fields: [donorId], references: [id], onDelete: Restrict)
+  status                ResponseStatus @default(PENDING)
+  respondedAt           DateTime?      // When donor accepted/declined
+  disclosureAuthorized  Boolean        @default(false) // Set to true ONLY upon verified ACCEPTED + active consent
+  contactDisclosedAt    DateTime?      // Audit timestamp when contact was unlocked for requester
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  @@unique([requestId, donorId]) // A donor is associated at most once per request
+  @@index([donorId, status])
+  @@index([requestId, status])
+  @@map("donor_responses")
+}
+
+// ----------------------------------------------------
+// Audit & Consent Event Log (Privacy & Compliance)
+// ----------------------------------------------------
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  userId      String?
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action      String   // e.g. "CONSENT_OPT_IN", "CONTACT_DISCLOSED", "REQUEST_CLOSED"
+  resource    String   // e.g. "DonorProfile", "DonorResponse"
+  resourceId  String?
+  metadata    Json?    // Contextual data (IP, policy version, state transition)
+  createdAt   DateTime @default(now())
+
+  @@index([action, createdAt])
+  @@index([userId])
+  @@map("audit_logs")
+}
+
+// ----------------------------------------------------
+// Authenticated User Sessions
+// Supports HTTP-only cookie auth, revocation, and expiry
+// ----------------------------------------------------
+
+model Session {
+  id         String    @id @default(uuid())
+  token      String    @unique
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([token])
+  @@index([userId])
+  @@map("sessions")
+}
+
+// ====================================================
+// PHASE 1 ARCHITECTURE FOUNDATION: ORGANISATIONS & CAMPS
+// ====================================================
+
+enum OrgType {
+  BLOOD_BANK
+  RECEIVING_FACILITY
+  STORAGE_CENTRE
+}
+
+enum OrgStatus {
+  PENDING_VERIFICATION
+  VERIFIED
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum OrgRole {
+  ORG_ADMIN
+  INVENTORY_STAFF
+  CLINICAL_STAFF
+  COLLECTION_STAFF
+  AUDITOR
+}
+
+enum ApplicationStatus {
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  RETURNED_FOR_CORRECTION
+}
+
+enum CampStatus {
+  PROPOSED
+  APPROVED
+  REJECTED
+  COMPLETED
+  CANCELLED
+}
+
+// ----------------------------------------------------
+// Verified Organisations (Participating Blood Banks & Facilities)
+// Decoupled from public directory imports; requires explicit onboarding
+// ----------------------------------------------------
+
+model Organisation {
+  id            String      @id @default(uuid())
+  orgCode       String      @unique // Unique organisation code e.g. "ORG-MH-PUN-001"
+  name          String      // Official accredited organisation name
+  type          OrgType     @default(BLOOD_BANK)
+  licenseNumber String      @unique // CDSCO / State Blood Transfusion Council license
+  stateCode     Int         @default(27) // Maharashtra = 27
+  districtCode  Int
+  districtName  String?
+  address       String?
+  email         String?
+  phone         String?
+  status        OrgStatus   @default(PENDING_VERIFICATION)
+
+  // Optional association to public directory BloodCentre
+  hospitalCode  String?
+  bloodCentre   BloodCentre? @relation(fields: [hospitalCode], references: [hospitalCode], onDelete: SetNull)
+
+  verifiedAt    DateTime?
+  verifiedBy    String?     // Admin user identifier who verified the organisation
+
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  memberships   OrganisationMembership[]
+  applications  OrganisationApplication[]
+  camps         Camp[]
+  collectionUnits CollectionUnit[]
+  componentUnits  ComponentUnit[]
+  unitStatusHistories UnitStatusHistory[]
+  sentManifests       HandoverManifest[]   @relation("SentManifests")
+  receivedManifests   HandoverManifest[]   @relation("ReceivedManifests")
+  laboratoryTestRecords LaboratoryTestRecord[]
+  clinicalReleaseRecords ClinicalReleaseRecord[]
+  storageLocations      StorageLocation[]
+  storageMovements      StorageMovementRecord[]
+  issuedHospitalOrders   HospitalIssueOrder[] @relation("IssuedHospitalOrders")
+  receivedHospitalOrders HospitalIssueOrder[] @relation("ReceivedHospitalOrders")
+  dispositionRecords     ComponentDispositionRecord[]
+  campStaffAssignments   CampStaffAssignment[]
+
+  @@index([stateCode, districtCode])
+  @@index([licenseNumber])
+  @@index([status])
+  @@map("organisations")
+}
+
+// ----------------------------------------------------
+// Organisation Membership & Staff Permissions
+// Explicit role assignments; strictly isolated by organisation
+// ----------------------------------------------------
+
+model OrganisationMembership {
+  id             String       @id @default(uuid())
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  role           OrgRole      @default(INVENTORY_STAFF)
+  isActive       Boolean      @default(true)
+  assignedAt     DateTime     @default(now())
+  assignedBy     String?      // User ID of the administrator who assigned this role
+
+  @@unique([userId, organisationId]) // Single active membership role per user per organisation
+  @@index([organisationId, role])
+  @@index([userId])
+  @@map("organisation_memberships")
+}
+
+// ----------------------------------------------------
+// Institutional Onboarding Applications
+// Captures self-service onboarding submissions prior to approval
+// ----------------------------------------------------
+
+model OrganisationApplication {
+  id              String            @id @default(uuid())
+  applicantUserId String?
+  applicantUser   User?             @relation(fields: [applicantUserId], references: [id], onDelete: SetNull)
+  hospitalName    String
+  licenseNumber   String
+  stateCode       Int               @default(27)
+  districtCode    Int
+  districtName    String?
+  contactPerson   String
+  email           String
+  phone           String
+  componentTypes  String[]          // e.g. ["PRBC", "Whole Blood", "Platelets"]
+  status          ApplicationStatus @default(SUBMITTED)
+  reviewNotes     String?
+  reviewedBy      String?           // Reviewer admin user identifier
+  reviewedAt      DateTime?
+
+  resultingOrgId  String?
+  resultingOrg    Organisation?     @relation(fields: [resultingOrgId], references: [id], onDelete: SetNull)
+
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@index([status, createdAt])
+  @@index([licenseNumber])
+  @@map("organisation_applications")
+}
+
+// ----------------------------------------------------
+// Voluntary Donation Camps (Community Drives)
+// Must be associated with an accredited parent blood bank
+// ----------------------------------------------------
+
+model Camp {
+  id                 String       @id @default(uuid())
+  campCode           String       @unique // Human-readable identifier e.g. "CAMP-2026-001"
+  title              String
+  organizerName      String
+  targetDate         DateTime
+  timeSlot           String?      // e.g. "09:00 AM - 03:00 PM"
+  venue              String
+  district           String?
+  districtCode       Int
+  stateCode          Int          @default(27)
+  expectedDonors     Int          @default(50)
+  coordinatorContact String?
+  status             CampStatus   @default(PROPOSED)
+
+  // Parent blood centre association (public directory centre or verified organisation)
+  hospitalCode       String?
+  bloodCentre        BloodCentre?  @relation(fields: [hospitalCode], references: [hospitalCode], onDelete: SetNull)
+  organisationId     String?
+  organisation       Organisation? @relation(fields: [organisationId], references: [id], onDelete: SetNull)
+
+  // Phase 3: Operational Readiness Boundary
+  isReadyForCollection Boolean       @default(false)
+  readinessVerifiedAt  DateTime?
+  readinessVerifiedBy  String?
+  readinessChecklist   Json?
+  readinessNotes       String?
+
+  // Creator & Approval Governance
+  createdById          String?
+  creator              User?         @relation("CreatedCamps", fields: [createdById], references: [id], onDelete: SetNull)
+  approvedById         String?
+  approvedBy           User?         @relation("ApprovedCamps", fields: [approvedById], references: [id], onDelete: SetNull)
+  approvedAt           DateTime?
+  rejectionReason      String?
+  rejectedAt           DateTime?
+
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  attendances        CampAttendance[]
+  clinicalScreenings ClinicalScreening[]
+  donationEvents     DonationEvent[]
+  collectionUnits    CollectionUnit[]
+  handoverManifests  HandoverManifest[]
+  staffAssignments   CampStaffAssignment[]
+
+  @@index([status, targetDate])
+  @@index([districtCode])
+  @@index([createdById])
+  @@map("camps")
+}
+
+// ====================================================
+// PHASE 3: CAMP OPERATIONS, ATTENDANCE, SCREENING & DONATION
+// ====================================================
+
+enum AttendanceStatus {
+  REGISTERED
+  CHECKED_IN
+  CANCELLED
+}
+
+enum ScreeningStatus {
+  PENDING
+  CLEARED
+  DEFERRED
+  NOT_COMPLETED
+}
+
+enum DonationOutcome {
+  COMPLETED
+  DEFERRED
+  NOT_PERFORMED
+  ADVERSE_EVENT_STOPPED
+}
+
+enum DonationType {
+  WHOLE_BLOOD
+  APHERESIS_PLATELETS
+  APHERESIS_PLASMA
+}
+
+enum CampStaffRole {
+  CAMP_ADMIN
+  CAMP_COORDINATOR
+  CLINICAL_STAFF
+  COLLECTION_STAFF
+}
+
+// ----------------------------------------------------
+// Camp Staff & Coordinator Assignments
+// Explicit, auditable role assignment per camp by parent blood bank
+// ----------------------------------------------------
+
+model CampStaffAssignment {
+  id              String        @id @default(uuid())
+  campId          String
+  camp            Camp          @relation(fields: [campId], references: [id], onDelete: Cascade)
+  userId          String
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organisationId  String
+  organisation    Organisation  @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  role            CampStaffRole @default(CAMP_COORDINATOR)
+  isActive        Boolean       @default(true)
+  assignedAt      DateTime      @default(now())
+  assignedBy      String        // User ID of the parent-bank administrator who assigned this
+  revokedAt       DateTime?
+  revokedBy       String?
+
+  @@unique([userId, campId, role])
+  @@index([campId, isActive])
+  @@index([userId, isActive])
+  @@index([organisationId])
+  @@map("camp_staff_assignments")
+}
+
+// ----------------------------------------------------
+// Camp Attendance Roster (Donor Check-in & Roster)
+// Strictly isolated per camp; attendance does NOT imply donation
+// ----------------------------------------------------
+
+model CampAttendance {
+  id                 String           @id @default(uuid())
+  campId             String
+  camp               Camp             @relation(fields: [campId], references: [id], onDelete: Cascade)
+  userId             String
+  user               User             @relation(fields: [userId], references: [id], onDelete: Restrict)
+  donorProfileId     String?
+  donorProfile       DonorProfile?    @relation(fields: [donorProfileId], references: [id], onDelete: SetNull)
+  donorName          String           // Display name captured at registration
+  donorPhone         String           // Restricted contact phone
+  bloodGroup         BloodGroup?
+  status             AttendanceStatus @default(REGISTERED)
+  registeredAt       DateTime         @default(now())
+  checkedInAt        DateTime?
+  checkedInBy        String?          // Staff member userId who checked the donor in
+  cancellationReason String?
+  cancelledAt        DateTime?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  screening          ClinicalScreening?
+  donationEvent      DonationEvent?
+
+  @@unique([campId, userId]) // Prevents duplicate attendance for same donor at same camp
+  @@index([campId, status])
+  @@index([userId])
+  @@map("camp_attendances")
+}
+
+// ----------------------------------------------------
+// Clinical Screening & Informed Consent Record
+// Restricted strictly to CLINICAL_STAFF and ORG_ADMIN
+// ----------------------------------------------------
+
+model ClinicalScreening {
+  id                   String          @id @default(uuid())
+  campId               String
+  camp                 Camp            @relation(fields: [campId], references: [id], onDelete: Cascade)
+  attendanceId         String          @unique // One screening record per attendance
+  attendance           CampAttendance  @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
+  donorUserId          String
+  donorUser            User            @relation(fields: [donorUserId], references: [id], onDelete: Restrict)
+  screenedBy           String          // User ID of authorized clinical staff
+  status               ScreeningStatus @default(PENDING)
+
+  // Informed Consent
+  consentVersion       String          @default("v1.0")
+  consentGiven         Boolean         @default(true)
+  consentRecordedAt    DateTime        @default(now())
+  consentRecordedBy    String?
+
+  // Clinical Decisions & Deferrals
+  eligibilityDecision  String?         // "CLEARED" | "TEMPORARY_DEFERRAL" | "PERMANENT_DEFERRAL"
+  deferralCategory     String?         // "LOW_HEMOGLOBIN", "RECENT_ILLNESS", "MEDICATION", "WEIGHT_CRITERIA", "OTHER"
+  deferralDurationDays Int?
+  deferredUntil        DateTime?
+  clinicalNotes        String?         // Strictly restricted medical note
+
+  // Auditable Amendments
+  isAmended            Boolean         @default(false)
+  amendedAt            DateTime?
+  amendedBy            String?
+  amendmentReason      String?
+
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+
+  donationEvent        DonationEvent?
+
+  @@index([campId, status])
+  @@index([donorUserId])
+  @@map("clinical_screenings")
+}
+
+// ----------------------------------------------------
+// Donation Event (Physical Donation Event Record)
+// Separated from physical collection unit / component tracking
+// ----------------------------------------------------
+
+model DonationEvent {
+  id                   String             @id @default(uuid())
+  campId               String
+  camp                 Camp               @relation(fields: [campId], references: [id], onDelete: Cascade)
+  attendanceId         String             @unique // One donation event per attendance
+  attendance           CampAttendance     @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
+  screeningId          String?            @unique
+  screening            ClinicalScreening? @relation(fields: [screeningId], references: [id], onDelete: SetNull)
+  donorUserId          String
+  donorUser            User               @relation(fields: [donorUserId], references: [id], onDelete: Restrict)
+  bloodGroup           BloodGroup
+  donationType         DonationType       @default(WHOLE_BLOOD)
+  outcome              DonationOutcome    @default(COMPLETED)
+  volumeMl             Int?               // e.g. 350 or 450
+  adverseReaction      Boolean            @default(false)
+  adverseReactionNotes String?
+  recordedBy           String             // User ID of COLLECTION_STAFF, CLINICAL_STAFF, or ORG_ADMIN
+  performedAt          DateTime           @default(now())
+  notes                String?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  collectionUnit       CollectionUnit?
+
+  @@index([campId, outcome])
+  @@index([donorUserId])
+  @@map("donation_events")
+}
+
+// ====================================================
+// PHASE 4: BLOOD COLLECTION UNIT & COMPONENT TRACEABILITY
+// ====================================================
+
+enum CollectionUnitStatus {
+  COLLECTED
+  PREPARED_FOR_HANDOVER
+  IN_TRANSIT
+  RECEIVED_BY_CENTRE
+  QUARANTINED
+  REJECTED
+  PROCESSING_COMPLETED
+}
+
+enum ComponentUnitStatus {
+  QUARANTINED
+  AWAITING_TESTING
+  AWAITING_CLINICAL_REVIEW
+  AVAILABLE
+  RESERVED
+  ISSUED
+  EXPIRED
+  DISCARDED
+}
+
+enum ComponentType {
+  WHOLE_BLOOD
+  PRBC
+  FRESH_FROZEN_PLASMA
+  PLATELET_CONCENTRATE
+  CRYOPRECIPITATE
+  BUFFY_COAT
+}
+
+// ----------------------------------------------------
+// Physical Blood Collection Unit (Source Blood Bag)
+// Strictly isolated from donor PII; 1:1 with completed DonationEvent
+// ----------------------------------------------------
+
+model CollectionUnit {
+  id                   String               @id @default(uuid())
+  unitNumber           String               @unique // Unique internal traceable identifier e.g. "CU-2026-PUN-000123"
+  bagIdentifier        String?              // Optional official bag / barcode reference
+  donationEventId      String               @unique // Strictly 1:1 with originating completed donation event
+  donationEvent        DonationEvent        @relation(fields: [donationEventId], references: [id], onDelete: Restrict)
+  campId               String?
+  camp                 Camp?                @relation(fields: [campId], references: [id], onDelete: SetNull)
+  organisationId       String
+  organisation         Organisation         @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  bloodGroup           BloodGroup
+  volumeMl             Int?                 // e.g. 350 or 450 ml
+  status               CollectionUnitStatus @default(COLLECTED)
+  collectedAt          DateTime             @default(now())
+  collectedBy          String               // User ID of phlebotomy staff
+  collector            User                 @relation("CollectedBy", fields: [collectedBy], references: [id], onDelete: Restrict)
+  notes                String?
+  metadata             Json?
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+
+  components           ComponentUnit[]
+  statusHistory        UnitStatusHistory[]
+  handoverItems        HandoverItem[]
+  reconciliationExceptions ReconciliationException[]
+  laboratoryTests      LaboratoryTestRecord[]
+
+  @@index([organisationId, status])
+  @@index([campId])
+  @@index([unitNumber])
+  @@map("collection_units")
+}
+
+// ----------------------------------------------------
+// Derived Blood Component Unit
+// Represents individual separated components (0, 1, or N from source collection)
+// ----------------------------------------------------
+
+model ComponentUnit {
+  id                   String              @id @default(uuid())
+  componentCode        String              @unique // Unique component identifier e.g. "CMP-2026-PRBC-000456"
+  collectionUnitId     String
+  collectionUnit       CollectionUnit      @relation(fields: [collectionUnitId], references: [id], onDelete: Cascade)
+  componentType        ComponentType
+  bloodGroup           BloodGroup
+  volumeMl             Int?                // e.g. 250, 200, 50 ml
+  organisationId       String
+  organisation         Organisation        @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  status               ComponentUnitStatus @default(QUARANTINED)
+  derivedAt            DateTime            @default(now())
+  derivedBy            String              // User ID of laboratory/processing technician
+  deriver              User                @relation("DerivedBy", fields: [derivedBy], references: [id], onDelete: Restrict)
+  expiresAt            DateTime            // Shelf-life expiry based on component type standards
+  notes                String?
+  metadata             Json?
+  
+  // Phase 6: Storage Location & Provenance
+  storageLocationId    String?
+  storageLocation      StorageLocation?    @relation(fields: [storageLocationId], references: [id], onDelete: SetNull)
+  expiryProvenance     Json?               // Structured provenance: protocol reference, anticoagulant, allowable duration
+  isHold               Boolean             @default(false)
+  holdReason           String?
+  holdPlacedAt         DateTime?
+  holdPlacedById       String?
+  dispositionType      String?             // e.g. "DISCARDED_EXPIRED", "DISCARDED_TTI_REACTIVE", "DISCARDED_DAMAGED", "ISSUED"
+  dispositionReason    String?
+  dispositionedAt      DateTime?
+  dispositionedById    String?
+
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+
+  statusHistory        UnitStatusHistory[]
+  laboratoryTests      LaboratoryTestRecord[]
+  clinicalReleases     ClinicalReleaseRecord[]
+  storageMovements     StorageMovementRecord[]
+  hospitalIssueItems   HospitalIssueItem[]
+  hospitalDiscrepancies HospitalDiscrepancy[]
+  dispositionRecords   ComponentDispositionRecord[]
+
+  @@index([organisationId, status])
+  @@index([collectionUnitId])
+  @@index([componentCode])
+  @@index([componentType, bloodGroup])
+  @@index([storageLocationId])
+  @@map("component_units")
+}
+
+// ----------------------------------------------------
+// Append-Only Unit Status History (Auditable Lineage Trail)
+// Strictly preserved; records atomic lifecycle transitions without overwriting
+// ----------------------------------------------------
+
+model UnitStatusHistory {
+  id                   String          @id @default(uuid())
+  unitType             String          // "COLLECTION_UNIT" | "COMPONENT_UNIT"
+  collectionUnitId     String?
+  collectionUnit       CollectionUnit? @relation(fields: [collectionUnitId], references: [id], onDelete: Cascade)
+  componentUnitId      String?
+  componentUnit        ComponentUnit?  @relation(fields: [componentUnitId], references: [id], onDelete: Cascade)
+  fromStatus           String?
+  toStatus             String
+  actorUserId          String
+  actorUser            User            @relation("ActorUser", fields: [actorUserId], references: [id], onDelete: Restrict)
+  organisationId       String
+  organisation         Organisation    @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  reason               String?
+  referenceNote        String?
+  metadata             Json?
+  timestamp            DateTime        @default(now())
+
+  @@index([collectionUnitId, timestamp])
+  @@index([componentUnitId, timestamp])
+  @@index([organisationId])
+  @@map("unit_status_histories")
+}
+
+// ====================================================
+// PHASE 5: PHYSICAL HANDOVER, TRANSPORT AND RECONCILIATION
+// ====================================================
+
+enum ManifestStatus {
+  DRAFT
+  FINALISED
+  DISPATCHED
+  PARTIALLY_RECEIVED
+  RECEIVED_WITH_DISCREPANCIES
+  RECONCILED
+  CANCELLED
+}
+
+enum ItemReceiptOutcome {
+  PENDING
+  VERIFIED_INTACT
+  DAMAGED
+  TEMPERATURE_EXCURSION
+  MISSING
+  MISMATCHED
+  UNEXPECTED
+}
+
+enum DiscrepancyCategory {
+  UNIT_MISSING
+  UNEXPECTED_UNIT
+  IDENTIFIER_MISMATCH
+  DAMAGED_BAG
+  COLD_CHAIN_BREACH
+  QUANTITY_MISMATCH
+  OTHER
+}
+
+enum ExceptionSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum ExceptionStatus {
+  OPEN
+  INVESTIGATING
+  RESOLVED
+  WAIVED
+}
+
+// ----------------------------------------------------
+// Handover Manifest
+// Tracks custody transfer transaction between camp/sending org and receiving blood bank
+// ----------------------------------------------------
+
+model HandoverManifest {
+  id                     String             @id @default(uuid())
+  manifestNumber         String             @unique // Authoritative identifier e.g. "HM-2026-PUN-0001"
+  campId                 String?
+  camp                   Camp?              @relation(fields: [campId], references: [id], onDelete: SetNull)
+  sendingOrganisationId  String
+  sendingOrganisation    Organisation       @relation("SentManifests", fields: [sendingOrganisationId], references: [id], onDelete: Restrict)
+  receivingOrganisationId String
+  receivingOrganisation  Organisation       @relation("ReceivedManifests", fields: [receivingOrganisationId], references: [id], onDelete: Restrict)
+  status                 ManifestStatus     @default(DRAFT)
+  transportDetails       Json?              // e.g. { vehicleNumber, courierName, driverPhone, coldBoxTempCelsius, notes }
+  createdById            String
+  createdBy              User               @relation("CreatedManifests", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt              DateTime           @default(now())
+  finalisedById          String?
+  finalisedBy            User?              @relation("FinalisedManifests", fields: [finalisedById], references: [id], onDelete: Restrict)
+  finalisedAt            DateTime?
+  dispatchedById         String?
+  dispatchedBy           User?              @relation("DispatchedManifests", fields: [dispatchedById], references: [id], onDelete: Restrict)
+  dispatchedAt           DateTime?
+  reconciledById         String?
+  reconciledBy           User?              @relation("ReconciledManifests", fields: [reconciledById], references: [id], onDelete: Restrict)
+  reconciledAt           DateTime?
+  notes                  String?
+  updatedAt              DateTime           @updatedAt
+
+  items                  HandoverItem[]
+  exceptions             ReconciliationException[]
+
+  @@index([sendingOrganisationId, status])
+  @@index([receivingOrganisationId, status])
+  @@index([campId])
+  @@index([manifestNumber])
+  @@map("handover_manifests")
+}
+
+// ----------------------------------------------------
+// Handover Item
+// Represents an individual collection unit listed within a manifest
+// ----------------------------------------------------
+
+model HandoverItem {
+  id                 String             @id @default(uuid())
+  manifestId         String
+  manifest           HandoverManifest   @relation(fields: [manifestId], references: [id], onDelete: Cascade)
+  collectionUnitId   String
+  collectionUnit     CollectionUnit     @relation(fields: [collectionUnitId], references: [id], onDelete: Restrict)
+  expectedUnitNumber String
+  outcome            ItemReceiptOutcome @default(PENDING)
+  receivedAt         DateTime?
+  verifiedById       String?
+  verifiedBy         User?              @relation("VerifiedHandoverItems", fields: [verifiedById], references: [id], onDelete: Restrict)
+  discrepancyNote    String?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  exceptions         ReconciliationException[]
+
+  @@unique([manifestId, collectionUnitId]) // Prevent duplicate inclusion in same manifest
+  @@index([collectionUnitId])
+  @@index([manifestId, outcome])
+  @@map("handover_items")
+}
+
+// ----------------------------------------------------
+// Reconciliation Exception
+// Records auditable discrepancies between expected manifest contents and physical receipt
+// ----------------------------------------------------
+
+model ReconciliationException {
+  id                 String              @id @default(uuid())
+  manifestId         String
+  manifest           HandoverManifest    @relation(fields: [manifestId], references: [id], onDelete: Cascade)
+  handoverItemId     String?
+  handoverItem       HandoverItem?       @relation(fields: [handoverItemId], references: [id], onDelete: SetNull)
+  collectionUnitId   String?
+  collectionUnit     CollectionUnit?     @relation(fields: [collectionUnitId], references: [id], onDelete: SetNull)
+  category           DiscrepancyCategory
+  severity           ExceptionSeverity   @default(MEDIUM)
+  status             ExceptionStatus     @default(OPEN)
+  description        String
+  resolutionNotes    String?
+  resolvedById       String?
+  resolvedBy         User?               @relation("ResolvedExceptions", fields: [resolvedById], references: [id], onDelete: Restrict)
+  resolvedAt         DateTime?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  @@index([manifestId, status])
+  @@index([category])
+  @@map("reconciliation_exceptions")
+}
+
+// ====================================================
+// PHASE 6: PROCESSING, LABORATORY RECORDS, CLINICAL RELEASE & INVENTORY
+// ====================================================
+
+enum TestCategory {
+  TTI_SCREENING
+  BLOOD_GROUPING
+  ANTIBODY_SCREENING
+  COMPONENT_QC
+  OTHER
+}
+
+enum TestType {
+  HIV_ANTIBODY
+  HCV_ANTIBODY
+  HBSAG
+  SYPHILIS_RPR
+  MALARIA_ANTIGEN
+  ABO_RH_CONFIRMATION
+  IRREGULAR_ANTIBODY
+  COMPONENT_VOLUME
+  PLATELET_YIELD
+  HEMATOCRIT
+  OTHER
+}
+
+enum TestResultOutcome {
+  NON_REACTIVE
+  REACTIVE
+  INDETERMINATE
+  CONFIRMED_POSITIVE
+  NOT_APPLICABLE
+}
+
+enum TestRecordStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  INVALID
+  REPEAT_REQUIRED
+}
+
+enum ClinicalReleaseDecision {
+  RELEASED
+  WITHHELD
+  QUARANTINE_HOLD
+  DISCARD_ORDERED
+}
+
+enum StorageType {
+  BLOOD_BANK_REFRIGERATOR
+  DEEP_FREEZER
+  PLATELET_AGITATOR
+  QUARANTINE_STORAGE
+  DISPOSITION_HOLD
+}
+
+// ----------------------------------------------------
+// Laboratory Test Record
+// Links directly to parent CollectionUnit or derived ComponentUnit
+// Preserves historical testing without overwriting prior runs
+// ----------------------------------------------------
+
+model LaboratoryTestRecord {
+  id                   String             @id @default(uuid())
+  collectionUnitId     String?
+  collectionUnit       CollectionUnit?    @relation(fields: [collectionUnitId], references: [id], onDelete: Cascade)
+  componentUnitId      String?
+  componentUnit        ComponentUnit?     @relation(fields: [componentUnitId], references: [id], onDelete: Cascade)
+  organisationId       String
+  organisation         Organisation       @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  category             TestCategory
+  testType             TestType
+  testName             String             // e.g. "HIV 1/2 4th Gen Ag/Ab ELISA", "ABO/Rh Confirmation"
+  sampleBarcode        String?
+  status               TestRecordStatus   @default(PENDING)
+  resultOutcome        TestResultOutcome?
+  quantitativeValue    String?            // e.g. "0.12 S/CO", "55% Hct", "6.5 x 10^10"
+  units                String?
+  referenceRange       String?            // e.g. "< 1.0 Non-reactive"
+  reagentLot           String?
+  reagentExpiry        DateTime?
+  instrumentId         String?            // Analyzer equipment ID
+  performedById        String?
+  performedBy          User?              @relation("PerformedTests", fields: [performedById], references: [id], onDelete: SetNull)
+  performedAt          DateTime?
+  verifiedById         String?
+  verifiedBy           User?              @relation("VerifiedTests", fields: [verifiedById], references: [id], onDelete: SetNull)
+  verifiedAt           DateTime?
+  isHistorical         Boolean            @default(false) // Flagged if a repeat test superseded this run
+  notes                String?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  @@index([collectionUnitId])
+  @@index([componentUnitId])
+  @@index([organisationId, status])
+  @@index([testType, resultOutcome])
+  @@map("laboratory_test_records")
+}
+
+// ----------------------------------------------------
+// Clinical Release Record
+// Auditable decision by authorized CLINICAL_STAFF to release or withhold
+// ----------------------------------------------------
+
+model ClinicalReleaseRecord {
+  id                       String                  @id @default(uuid())
+  componentUnitId          String
+  componentUnit            ComponentUnit           @relation(fields: [componentUnitId], references: [id], onDelete: Cascade)
+  organisationId           String
+  organisation             Organisation            @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  decision                 ClinicalReleaseDecision
+  authorizedClinicalUserId String
+  authorizedClinicalUser   User                    @relation("AuthorizedReleases", fields: [authorizedClinicalUserId], references: [id], onDelete: Restrict)
+  decisionTimestamp        DateTime                @default(now())
+  reason                   String
+  reviewedTestIds          Json                    // Array of verified test record IDs backing this release
+  clinicalProtocolRef      String?                 // e.g. "NBTC Schedule F(K) Standard Release Protocol"
+  dispositionNotes         String?
+  createdAt                DateTime                @default(now())
+  updatedAt                DateTime                @updatedAt
+
+  @@index([componentUnitId])
+  @@index([organisationId, decision])
+  @@map("clinical_release_records")
+}
+
+// ----------------------------------------------------
+// Storage Location
+// Structured equipment/location within blood bank (refrigerators, freezers, agitators)
+// ----------------------------------------------------
+
+model StorageLocation {
+  id                  String                 @id @default(uuid())
+  organisationId      String
+  organisation        Organisation           @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  locationCode        String                 // Unique code within org e.g. "COLD-01", "FREEZER-A"
+  name                String                 // e.g. "Main Cold Room Refrigerator 1"
+  storageType         StorageType
+  targetTempRange     String                 // e.g. "+2°C to +6°C", "≤ -30°C", "+20°C to +24°C"
+  roomOrArea          String?                // e.g. "Component Processing Laboratory"
+  equipmentIdentifier String?                // e.g. "THERMO-TSX-400"
+  shelfOrRack         String?                // e.g. "Rack 2, Shelf B"
+  isActive            Boolean                @default(true)
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+
+  components          ComponentUnit[]
+  movementsFrom       StorageMovementRecord[] @relation("FromLocation")
+  movementsTo         StorageMovementRecord[] @relation("ToLocation")
+
+  @@unique([organisationId, locationCode])
+  @@index([organisationId, isActive])
+  @@map("storage_locations")
+}
+
+// ----------------------------------------------------
+// Storage Movement Record
+// Audit trail of physical movements between storage locations
+// ----------------------------------------------------
+
+model StorageMovementRecord {
+  id                         String           @id @default(uuid())
+  componentUnitId            String
+  componentUnit              ComponentUnit    @relation(fields: [componentUnitId], references: [id], onDelete: Cascade)
+  organisationId             String
+  organisation               Organisation     @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  fromLocationId             String?
+  fromLocation               StorageLocation? @relation("FromLocation", fields: [fromLocationId], references: [id], onDelete: SetNull)
+  toLocationId               String
+  toLocation                 StorageLocation  @relation("ToLocation", fields: [toLocationId], references: [id], onDelete: Restrict)
+  movedById                  String
+  movedBy                    User             @relation("MovedBy", fields: [movedById], references: [id], onDelete: Restrict)
+  timestamp                  DateTime         @default(now())
+  reason                     String
+  observedTempCelsius        Float?
+  temperatureExcursionNoted  Boolean          @default(false)
+  excursionNotes             String?
+  createdAt                  DateTime         @default(now())
+
+  @@index([componentUnitId])
+  @@index([organisationId, timestamp])
+  @@map("storage_movement_records")
+}
+
+// ----------------------------------------------------
+// Phase 7: Real-Time Event Delivery & Transactional Outbox
+// ----------------------------------------------------
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  DELIVERED
+  FAILED
+}
+
+model OutboxEvent {
+  id              String        @id @default(uuid())
+  eventType       String        // e.g. "component.status_changed", "handover.dispatched"
+  schemaVersion   String        @default("1.0")
+  entityType      String        // e.g. "ComponentUnit", "HandoverManifest"
+  entityId        String
+  organisationId  String?
+  recipientUserId String?
+  payload         Json          // Strictly sanitized, non-PII display metadata
+  status          OutboxStatus  @default(PENDING)
+  retryCount      Int           @default(0)
+  errorMessage    String?
+  deliveredAt     DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([status, createdAt])
+  @@index([organisationId, createdAt])
+  @@index([recipientUserId, createdAt])
+  @@map("outbox_events")
+}
+
+// ====================================================
+// PHASE 9: HOSPITAL INTEGRATION, ISSUE TRACKING & FINAL DISPOSITION
+// ====================================================
+
+enum HospitalIssueStatus {
+  AUTHORISED
+  DISPATCHED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  RECEIVED_WITH_DISCREPANCIES
+  CANCELLED
+}
+
+enum HospitalItemStatus {
+  AUTHORISED
+  DISPATCHED
+  RECEIVED
+  DISCREPANT
+  TRANSFUSED
+  RETURNED
+  DISCARDED
+}
+
+enum HospitalItemReceiptOutcome {
+  VERIFIED_INTACT
+  DAMAGED
+  TEMPERATURE_EXCURSION
+  MISMATCHED
+  MISSING
+  OTHER
+}
+
+enum HospitalDiscrepancyCategory {
+  DAMAGED_CONTAINER
+  COLD_CHAIN_EXCURSION
+  UNIT_MISSING
+  UNEXPECTED_UNIT
+  IDENTIFIER_MISMATCH
+  OTHER
+}
+
+enum ComponentDispositionType {
+  TRANSFUSION_DOCUMENTED
+  RETURNED_TO_BANK
+  DISCARDED_DAMAGED
+  DISCARDED_EXPIRED
+  DISCARDED_CLINICAL
+  OTHER
+}
+
+model HospitalIssueOrder {
+  id                     String              @id @default(uuid())
+  orderNumber            String              @unique
+  issuingOrganisationId  String
+  issuingOrganisation    Organisation        @relation("IssuedHospitalOrders", fields: [issuingOrganisationId], references: [id], onDelete: Restrict)
+  receivingFacilityId    String
+  receivingFacility      Organisation        @relation("ReceivedHospitalOrders", fields: [receivingFacilityId], references: [id], onDelete: Restrict)
+  requestId              String?
+  request                BloodRequest?       @relation("HospitalIssueOrders", fields: [requestId], references: [id], onDelete: SetNull)
+  status                 HospitalIssueStatus @default(AUTHORISED)
+  authorisationReason    String
+  authorisedAt           DateTime            @default(now())
+  authorisedById         String
+  authorisedBy           User                @relation("AuthorisedHospitalOrders", fields: [authorisedById], references: [id], onDelete: Restrict)
+  dispatchedAt           DateTime?
+  dispatchedById         String?
+  dispatchedBy           User?               @relation("DispatchedHospitalOrders", fields: [dispatchedById], references: [id], onDelete: Restrict)
+  transportDetails       Json?
+  receivedAt             DateTime?
+  receivedById           String?
+  receivedBy             User?               @relation("ReceivedHospitalOrders", fields: [receivedById], references: [id], onDelete: Restrict)
+  notes                  String?
+  createdAt              DateTime            @default(now())
+  updatedAt              DateTime            @updatedAt
+
+  items                  HospitalIssueItem[]
+  discrepancies          HospitalDiscrepancy[]
+
+  @@index([issuingOrganisationId, status])
+  @@index([receivingFacilityId, status])
+  @@index([orderNumber])
+  @@index([requestId])
+  @@map("hospital_issue_orders")
+}
+
+model HospitalIssueItem {
+  id                 String                      @id @default(uuid())
+  issueOrderId       String
+  issueOrder         HospitalIssueOrder          @relation(fields: [issueOrderId], references: [id], onDelete: Cascade)
+  componentUnitId    String
+  componentUnit      ComponentUnit               @relation(fields: [componentUnitId], references: [id], onDelete: Restrict)
+  status             HospitalItemStatus          @default(AUTHORISED)
+  receivingOutcome   HospitalItemReceiptOutcome?
+  receivingNotes     String?
+  receivedAt         DateTime?
+  receivedById       String?
+  receivedBy         User?                       @relation("VerifiedHospitalItems", fields: [receivedById], references: [id], onDelete: Restrict)
+  createdAt          DateTime                    @default(now())
+  updatedAt          DateTime                    @updatedAt
+
+  discrepancies      HospitalDiscrepancy[]
+
+  @@unique([issueOrderId, componentUnitId])
+  @@index([componentUnitId])
+  @@index([issueOrderId, status])
+  @@map("hospital_issue_items")
+}
+
+model HospitalDiscrepancy {
+  id                 String                      @id @default(uuid())
+  issueOrderId       String
+  issueOrder         HospitalIssueOrder          @relation(fields: [issueOrderId], references: [id], onDelete: Cascade)
+  issueItemId        String?
+  issueItem          HospitalIssueItem?          @relation(fields: [issueItemId], references: [id], onDelete: SetNull)
+  componentUnitId    String?
+  componentUnit      ComponentUnit?              @relation(fields: [componentUnitId], references: [id], onDelete: SetNull)
+  category           HospitalDiscrepancyCategory
+  severity           ExceptionSeverity           @default(MEDIUM)
+  status             ExceptionStatus             @default(OPEN)
+  description        String
+  reportedById       String
+  reportedBy         User                        @relation("ReportedHospitalDiscrepancies", fields: [reportedById], references: [id], onDelete: Restrict)
+  resolutionNotes    String?
+  resolvedById       String?
+  resolvedBy         User?                       @relation("ResolvedHospitalDiscrepancies", fields: [resolvedById], references: [id], onDelete: Restrict)
+  resolvedAt         DateTime?
+  createdAt          DateTime                    @default(now())
+  updatedAt          DateTime                    @updatedAt
+
+  @@index([issueOrderId, status])
+  @@index([category])
+  @@map("hospital_discrepancies")
+}
+
+model ComponentDispositionRecord {
+  id                     String                   @id @default(uuid())
+  componentUnitId        String
+  componentUnit          ComponentUnit            @relation(fields: [componentUnitId], references: [id], onDelete: Cascade)
+  organisationId         String
+  organisation           Organisation             @relation(fields: [organisationId], references: [id], onDelete: Restrict)
+  dispositionType        ComponentDispositionType
+  reason                 String
+  clinicalProtocolRef    String?
+  documentationRef       String?
+  recipientPatientRef    String?
+  recordedById           String
+  recordedBy             User                     @relation("RecordedDispositions", fields: [recordedById], references: [id], onDelete: Restrict)
+  recordedAt             DateTime                 @default(now())
+  auditCorrelationId     String?
+  notes                  String?
+  createdAt              DateTime                 @default(now())
+
+  @@index([componentUnitId])
+  @@index([organisationId, dispositionType])
+  @@map("component_disposition_records")
+}
+
+
+
