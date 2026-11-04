@@ -63,6 +63,14 @@ export class RealtimeService {
     this.wss = new WebSocketServer({
       noServer: true,
       maxPayload: this.MAX_PAYLOAD_BYTES,
+      handleProtocols: (protocols: Set<string> | string[]) => {
+        for (const p of protocols) {
+          if (p.startsWith('raktasetu-auth.')) {
+            return p;
+          }
+        }
+        return false;
+      },
     });
 
     // Handle HTTP Upgrade requests
@@ -388,6 +396,15 @@ export class RealtimeService {
           );
           return;
         }
+      } else if (channel === 'admin:live-locations' || channel === 'admin:blood-requests') {
+        if (client.userRole !== 'ADMIN') {
+          this.sendClientError(
+            client,
+            'FORBIDDEN_SUBSCRIPTION',
+            'Access denied: Channel is strictly restricted to Platform Administrators.'
+          );
+          return;
+        }
       } else {
         this.sendClientError(client, 'UNKNOWN_CHANNEL', `Unsupported channel prefix: "${channel}"`);
         return;
@@ -578,14 +595,20 @@ export class RealtimeService {
     this.isProcessingOutbox = true;
 
     try {
-      const pendingEvents = await prisma.outboxEvent.findMany({
-        where: {
-          status: 'PENDING',
-          retryCount: { lt: 5 },
-        },
-        orderBy: { createdAt: 'asc' },
-        take: batchSize,
-      });
+      let pendingEvents: any[] = [];
+      try {
+        pendingEvents = await prisma.outboxEvent.findMany({
+          where: {
+            status: 'PENDING',
+            retryCount: { lt: 5 },
+          },
+          orderBy: { createdAt: 'asc' },
+          take: batchSize,
+        });
+      } catch (dbErr: any) {
+        console.warn('[Realtime Outbox] Transient database fetch warning (retrying next tick):', dbErr?.message || dbErr);
+        return 0;
+      }
 
       if (pendingEvents.length === 0) {
         return 0;
@@ -617,15 +640,19 @@ export class RealtimeService {
             },
           });
         } catch (deliveryErr: any) {
-          const nextRetry = evt.retryCount + 1;
-          await prisma.outboxEvent.update({
-            where: { id: evt.id },
-            data: {
-              retryCount: nextRetry,
-              status: nextRetry >= 5 ? 'FAILED' : 'PENDING',
-              errorMessage: deliveryErr.message || String(deliveryErr),
-            },
-          });
+          try {
+            const nextRetry = evt.retryCount + 1;
+            await prisma.outboxEvent.update({
+              where: { id: evt.id },
+              data: {
+                retryCount: nextRetry,
+                status: nextRetry >= 5 ? 'FAILED' : 'PENDING',
+                errorMessage: deliveryErr.message || String(deliveryErr),
+              },
+            });
+          } catch (updateErr) {
+            console.warn('[Realtime Outbox] Could not update delivery status for event:', evt.id, updateErr);
+          }
         }
       }
       return pendingEvents.length;
@@ -638,6 +665,38 @@ export class RealtimeService {
    * Broadcasts envelope to connected authorized clients matching the event scope
    */
   private static broadcastEnvelope(envelope: RealtimeEventEnvelope) {
+    const isLocationEvent = envelope.eventType.startsWith('donor_location.');
+
+    // Security isolation: Donor location events are strictly dispatched to Platform Admin on admin:live-locations channel
+    if (isLocationEvent) {
+      for (const client of this.clients) {
+        if (
+          client.userId &&
+          client.userRole === 'ADMIN' &&
+          client.ws.readyState === WebSocket.OPEN &&
+          client.channels.has('admin:live-locations')
+        ) {
+          this.send(client, { type: 'event', event: envelope });
+        }
+      }
+      return;
+    }
+
+    // Platform Operations: Dispatch blood request lifecycle events to Platform Admin on admin:blood-requests channel
+    const isBloodRequestEvent = envelope.eventType.startsWith('blood_request.');
+    if (isBloodRequestEvent) {
+      for (const client of this.clients) {
+        if (
+          client.userId &&
+          client.userRole === 'ADMIN' &&
+          client.ws.readyState === WebSocket.OPEN &&
+          client.channels.has('admin:blood-requests')
+        ) {
+          this.send(client, { type: 'event', event: envelope });
+        }
+      }
+    }
+
     const orgChannel = envelope.organisationId ? `org:${envelope.organisationId}` : null;
     const invChannel = envelope.organisationId ? `inventory:${envelope.organisationId}` : null;
     const handChannel = envelope.organisationId ? `handover:${envelope.organisationId}` : null;

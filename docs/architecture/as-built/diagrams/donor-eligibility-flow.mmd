@@ -1,0 +1,33 @@
+flowchart TD
+    startDonor([Candidate Donor Profile Evaluated]) --> checkAccount{Account Status == ACTIVE?}
+    checkAccount -->|No| rejectIneligible([Hard Reject: Inactive or Suspended])
+    
+    checkAccount -->|Yes| checkConsent{Consent To Contact == TRUE?}
+    checkConsent -->|No| rejectIneligible
+    
+    checkConsent -->|Yes| checkAvailability{isAvailable == TRUE?}
+    checkAvailability -->|No| rejectIneligible
+    
+    checkAvailability -->|Yes| checkCompatibility{ABO & Rh Compatible with Recipient?}
+    checkCompatibility -->|No| rejectIneligible
+    
+    checkCompatibility -->|Yes| checkDonationInterval{Last Donation >= 90 Days ago?}
+    checkDonationInterval -->|No: In Interval| rejectInterval([Hard Reject: Active 90-Day Deferral])
+    
+    checkDonationInterval -->|Yes / Never Donated| eligibleDonor[Passes Hard Eligibility Filters]
+    
+    %% Deterministic Ranking
+    eligibleDonor --> evalProximity{GPS Freshness & Distance}
+    evalProximity -->|Fresh GPS <= 15km| scoreLevel1[Priority 1: Level 1 Nearby Fresh GPS]
+    evalProximity -->|Preferred Centre Match| scoreLevel2[Priority 2: Level 1 Preferred Centre]
+    evalProximity -->|Same District Code| scoreLevel3[Priority 3: Level 2 Registered District]
+    evalProximity -->|Out of District| scoreLevel4[Priority 4: Level 3 Expanded Scope]
+    
+    scoreLevel1 --> applyHistoryBonus[History Signal: Regular Donor + Completed Donations]
+    scoreLevel2 --> applyHistoryBonus
+    scoreLevel3 --> applyHistoryBonus
+    scoreLevel4 --> applyHistoryBonus
+    
+    applyHistoryBonus --> tieBreak[Tie-Break: Freshness > Donations > Last Donation > UUID]
+    tieBreak --> rankedCandidatePool([Output: Deterministically Ranked Candidates Pool])
+

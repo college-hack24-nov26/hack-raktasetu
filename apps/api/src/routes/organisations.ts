@@ -184,6 +184,30 @@ organisationsRouter.get(
 );
 
 /**
+ * GET /api/v1/organisations/me/applications
+ * List all onboarding applications submitted by or associated with the authenticated user.
+ */
+organisationsRouter.get(
+  '/organisations/me/applications',
+  requireAuth,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const applications = await OrganisationService.getMyApplications(req.user);
+      res.json({
+        success: true,
+        count: applications.length,
+        data: applications,
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        success: false,
+        error: { message: err.message || 'Failed to list user applications.', code: 'INTERNAL_ERROR' },
+      });
+    }
+  }
+);
+
+/**
  * GET /api/v1/organisations/applications/:id
  * Retrieve details of an application.
  * Restricted to the applicant or a Platform Administrator.
@@ -361,6 +385,83 @@ organisationsRouter.get(
         permissions: req.orgPermissions,
       },
     });
+  }
+);
+
+/**
+ * GET /api/v1/organisations/:id/location
+ * Retrieve the organisation's confirmed GPS coordinates and setup status.
+ */
+organisationsRouter.get(
+  '/organisations/:id/location',
+  requireAuth,
+  requireOrgPermission(['org:view']),
+  async (req: OrgScopedRequest, res: Response) => {
+    try {
+      const location = await OrganisationService.getLocation(String(req.params.id));
+      return res.json({
+        success: true,
+        data: location,
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        error: { message: err.message || 'Failed to retrieve location.', code: 'LOCATION_FETCH_FAILED' },
+      });
+    }
+  }
+);
+
+/**
+ * PUT /api/v1/organisations/:id/location
+ * Explicitly set or update confirmed Blood Bank location.
+ * Requires active ORG_ADMIN role and operational:write permission.
+ */
+organisationsRouter.put(
+  '/organisations/:id/location',
+  requireAuth,
+  requireOrgPermission(['operational:write'], ['ORG_ADMIN']),
+  async (req: OrgScopedRequest, res: Response) => {
+    try {
+      const { latitude, longitude, locationAddress } = req.body || {};
+
+      if (typeof latitude !== 'number' || typeof longitude !== 'number') {
+        return res.status(400).json({
+          success: false,
+          error: {
+            message: 'Both numeric latitude and longitude coordinates are required.',
+            code: 'INVALID_COORDINATES',
+          },
+        });
+      }
+
+      if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            message: 'Latitude must be between -90 and 90, and longitude between -180 and 180.',
+            code: 'COORDINATES_OUT_OF_BOUNDS',
+          },
+        });
+      }
+
+      const updated = await OrganisationService.confirmLocation(String(req.params.id), req.user.id, {
+        latitude,
+        longitude,
+        locationAddress,
+      });
+
+      return res.json({
+        success: true,
+        data: updated,
+        message: 'Blood Bank location confirmed successfully.',
+      });
+    } catch (err: any) {
+      return res.status(400).json({
+        success: false,
+        error: { message: err.message || 'Failed to confirm location.', code: 'LOCATION_CONFIRM_FAILED' },
+      });
+    }
   }
 );
 
@@ -658,6 +759,13 @@ organisationsRouter.get('/camps', async (req, res: Response) => {
       where,
       include: {
         bloodCentre: true,
+        creator: {
+          select: {
+            id: true,
+            name: true,
+            phoneNumber: true,
+          },
+        },
         organisation: {
           select: {
             id: true,
@@ -736,9 +844,10 @@ organisationsRouter.get('/camps/:id', async (req, res: Response) => {
     });
   } catch (err: any) {
     const isNotFound = err.message?.includes('not found');
-    res.status(isNotFound ? 404 : 500).json({
+    const isForbidden = err.message?.includes('Permission denied');
+    res.status(isNotFound ? 404 : isForbidden ? 403 : 500).json({
       success: false,
-      error: { message: err.message, code: isNotFound ? 'NOT_FOUND' : 'INTERNAL_ERROR' },
+      error: { message: err.message, code: isNotFound ? 'NOT_FOUND' : isForbidden ? 'FORBIDDEN' : 'INTERNAL_ERROR' },
     });
   }
 });
@@ -764,26 +873,6 @@ organisationsRouter.get('/camps/:id/analytics', async (req, res: Response) => {
       }
     }
 
-    if (callerUser && callerUser.role !== 'ADMIN') {
-      const campAssignment = await prisma.campStaffAssignment.findFirst({
-        where: {
-          campId,
-          userId: callerUser.id,
-          isActive: true,
-        },
-      });
-
-      if (campAssignment && ['CAMP_COORDINATOR', 'CLINICAL_STAFF'].includes(campAssignment.role)) {
-        return res.status(403).json({
-          success: false,
-          error: {
-            message: 'Permission denied: Full Camp Reports & Analytics are restricted to Camp Admin and authorized Collection Staff.',
-            code: 'FORBIDDEN_REPORT_ACCESS',
-          },
-        });
-      }
-    }
-
     const analytics = await CampOperationsService.getCampAnalytics(campId, callerUser);
 
     res.json({
@@ -791,10 +880,11 @@ organisationsRouter.get('/camps/:id/analytics', async (req, res: Response) => {
       data: analytics,
     });
   } catch (err: any) {
+    const isForbidden = err.message?.includes('Permission denied');
     const isNotFound = err.message?.includes('not found');
-    res.status(isNotFound ? 404 : 500).json({
+    res.status(isForbidden ? 403 : (isNotFound ? 404 : 500)).json({
       success: false,
-      error: { message: err.message, code: isNotFound ? 'NOT_FOUND' : 'INTERNAL_ERROR' },
+      error: { message: err.message, code: isForbidden ? 'FORBIDDEN' : (isNotFound ? 'NOT_FOUND' : 'INTERNAL_ERROR') },
     });
   }
 });
@@ -870,7 +960,7 @@ organisationsRouter.patch(
         data: updated,
       });
     } catch (err: any) {
-      const isForbidden = err.message?.includes('Permission denied');
+      const isForbidden = err.message?.includes('Permission denied') || err.message?.includes('Conflict of interest');
       res.status(isForbidden ? 403 : 400).json({
         success: false,
         error: { message: err.message || 'Failed to update camp status.', code: isForbidden ? 'FORBIDDEN' : 'UPDATE_FAILED' },

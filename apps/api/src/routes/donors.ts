@@ -1,10 +1,12 @@
-import { Router, Response, NextFunction } from 'express';
+
+import { Router, Request, Response, NextFunction } from 'express';
 import { prisma } from '../lib/prisma';
 import { requireAuth, AuthenticatedRequest } from '../middleware/auth';
 import { revokeAllUserSessions } from '../services/auth';
-import { findEligibleRequestsForDonor } from '../services/matching';
+import { findEligibleRequestsForDonor, sanitizeDonorName } from '../services/matching';
 import { notifyRequesterDonorAccepted } from '../services/whatsapp';
 import { RealtimeService } from '../services/realtime';
+import { parseRequestMessageMetadata } from '../services/hospitalIntegration';
 
 export const donorsRouter = Router();
 
@@ -664,6 +666,7 @@ donorsRouter.post(
 
       const donor = await prisma.donorProfile.findUnique({
         where: { userId },
+        include: { user: { select: { phoneNumber: true } } },
       });
 
       if (!donor) {
@@ -679,6 +682,7 @@ donorsRouter.post(
       // Check request existence and lifecycle status
       const request = await prisma.bloodRequest.findUnique({
         where: { id: requestId },
+        include: { bloodCentre: true },
       });
 
       if (!request) {
@@ -806,6 +810,27 @@ donorsRouter.post(
           },
         });
 
+        // Real-time event for designated Blood Bank organisation
+        const meta = parseRequestMessageMetadata(request.message, request.bloodCentre?.hospitalName);
+        if (meta.assignedBankId) {
+          await RealtimeService.publishOutboxEvent(tx, {
+            eventType: 'donor_invitation.response_changed',
+            organisationId: meta.assignedBankId,
+            entityType: 'DonorResponse',
+            entityId: resp.id,
+            payload: {
+              requestId,
+              responseId: resp.id,
+              donorId: donor.id,
+              status: newStatus,
+              respondedAt: resp.respondedAt,
+              contactDisclosed: isDisclosurePermitted,
+              donorPhone: isDisclosurePermitted && donor.user?.phoneNumber ? donor.user.phoneNumber : null,
+              donorName: isDisclosurePermitted ? donor.fullName : 'Voluntary Donor',
+            },
+          });
+        }
+
         return resp;
       });
 
@@ -896,4 +921,148 @@ donorsRouter.get(
     }
   }
 );
+
+/**
+ * GET /api/v1/donors/me/donations
+ * Authenticated donor views their authoritative completed donation history
+ */
+donorsRouter.get(
+  '/donors/me/donations',
+  requireAuth,
+  async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const userId = req.user.id;
+      const donations = await prisma.donationEvent.findMany({
+        where: {
+          donorUserId: userId,
+          outcome: 'COMPLETED',
+        },
+        select: {
+          id: true,
+          bloodGroup: true,
+          donationType: true,
+          outcome: true,
+          volumeMl: true,
+          performedAt: true,
+          camp: {
+            select: {
+              id: true,
+              campCode: true,
+              title: true,
+              organizerName: true,
+              venue: true,
+              district: true,
+              districtCode: true,
+              stateCode: true,
+              bloodCentre: {
+                select: {
+                  hospitalName: true,
+                  hospitalCode: true,
+                  address: true,
+                  mobileNo: true,
+                },
+              },
+            },
+          },
+          collectionUnit: {
+            select: {
+              bagIdentifier: true,
+              status: true,
+            },
+          },
+        },
+        orderBy: { performedAt: 'desc' },
+      });
+
+      res.json({
+        success: true,
+        data: donations,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * GET /api/v1/donors/discovery
+ * Search registered donors who have opted into community search (isSearchable: true, consentWithdrawnAt: null).
+ * Privacy rules:
+ * - Sanitized display names (e.g. "Vikram S.")
+ * - Never returns GPS coordinates
+ * - Never returns private phone numbers
+ * - Public or authenticated search
+ */
+donorsRouter.get(
+  '/donors/discovery',
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const bloodGroup = req.query.bloodGroup ? String(req.query.bloodGroup).trim() : undefined;
+      const districtCode = req.query.districtCode ? parseInt(String(req.query.districtCode), 10) : undefined;
+      const stateCode = req.query.stateCode ? parseInt(String(req.query.stateCode), 10) : 27;
+      const cityOrLocality = req.query.cityOrLocality ? String(req.query.cityOrLocality).trim() : undefined;
+
+      const where: any = {
+        isAvailable: true,
+        isSearchable: true,
+        consentWithdrawnAt: null,
+        user: { status: 'ACTIVE' },
+      };
+
+      if (bloodGroup && VALID_BLOOD_GROUPS.includes(bloodGroup)) {
+        where.bloodGroup = bloodGroup;
+      }
+      if (districtCode && !isNaN(districtCode)) {
+        where.districtCode = districtCode;
+      }
+      if (stateCode && !isNaN(stateCode)) {
+        where.stateCode = stateCode;
+      }
+      if (cityOrLocality) {
+        where.cityOrLocality = { contains: cityOrLocality, mode: 'insensitive' };
+      }
+
+      const donors = await prisma.donorProfile.findMany({
+        where,
+        select: {
+          id: true,
+          fullName: true,
+          bloodGroup: true,
+          districtCode: true,
+          stateCode: true,
+          cityOrLocality: true,
+          isAvailable: true,
+          updatedAt: true,
+          primaryCentre: {
+            select: {
+              hospitalName: true,
+              districtCode: true,
+            },
+          },
+        },
+        take: 50,
+        orderBy: { updatedAt: 'desc' },
+      });
+
+      const sanitized = donors.map((d) => ({
+        id: d.id,
+        displayName: sanitizeDonorName(d.fullName),
+        bloodGroup: d.bloodGroup,
+        districtCode: d.districtCode,
+        stateCode: d.stateCode,
+        cityOrLocality: d.cityOrLocality,
+        isAvailable: d.isAvailable,
+        primaryCentreName: d.primaryCentre?.hospitalName || null,
+      }));
+
+      res.json({
+        success: true,
+        data: sanitized,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
 

@@ -139,6 +139,7 @@ export function getDistrictCentroid(districtCode: number): Coordinates {
  */
 export const VERIFIED_CENTRE_COORDINATES: Record<string, Coordinates> = {
   // Pune District (521)
+  'ORG-MH-521-1613': { latitude: 18.5204, longitude: 73.8567 }, // Gupta Life Blood Centre, Pune
   '18061': { latitude: 18.5144, longitude: 73.8512 }, // Acharya Anandrishiji Blood Centre, Sadashiv Peth
   '18099': { latitude: 18.5089, longitude: 73.8340 }, // Sahyadri Blood Centre, Karve Road, Erandwane
   '9102': { latitude: 18.5236, longitude: 73.8672 },  // KEM Hospital Blood Centre, Rasta Peth
@@ -176,3 +177,185 @@ export const VERIFIED_CENTRE_COORDINATES: Record<string, Coordinates> = {
 export function getCentreCoordinates(hospitalCode: string): Coordinates | null {
   return VERIFIED_CENTRE_COORDINATES[hospitalCode] || null;
 }
+
+/**
+ * City / Suburban Area registry for cascading dropdown selection.
+ */
+export const CITIES_BY_DISTRICT: Record<number, string[]> = {
+  // Pune (521)
+  521: [
+    'Pune City (Central / Shivajinagar)',
+    'Kothrud / Deccan Gymkhana',
+    'Swargate / Sadashiv Peth',
+    'Hadapsar / Magarpatta',
+    'Hinjewadi / IT Park',
+    'Baner / Balewadi',
+    'Wakad / Pimple Saudagar',
+    'Pimpri / Chinchwad (PCMC)',
+    'Viman Nagar / Kharadi',
+    'Camp / Pune Cantonment',
+    'Aundh / Pashan',
+    'Katraj / Dhankawadi / Bibvewadi',
+    'Nigdi / Akurdi / Bhosari',
+    'Yerawada / Kalyani Nagar',
+    'Other / Specify Area',
+  ],
+  // Mumbai (519)
+  519: [
+    'Parel / Lalbaug / Byculla',
+    'Dadar / Matunga',
+    'Colaba / Fort / Nariman Point',
+    'Bandra (West / East)',
+    'Andheri (East / West)',
+    'Borivali / Dahisar',
+    'Ghatkopar / Vidyavihar',
+    'Kurla / Chunabhatti',
+    'Chembur / Tilak Nagar',
+    'Malad / Goregaon',
+    'Kandivali / Charkop',
+    'Worli / Lower Parel',
+    'Powai / Kanjurmarg',
+    'Juhu / Vile Parle',
+    'Other / Specify Area',
+  ],
+  // Nagpur (505)
+  505: [
+    'Dharampeth / Ramdaspeth',
+    'Sitabuldi / Civil Lines',
+    'Sadar / Mangalwari',
+    'Itwari / Gandhibagh',
+    'Wardhaman Nagar',
+    'Pratap Nagar / Khamla',
+    'Manish Nagar / Besa',
+    'Other / Specify Area',
+  ],
+  // Nashik (516)
+  516: [
+    'Panchavati',
+    'College Road / Gangapur Road',
+    'CIDCO / Ambad',
+    'Indira Nagar / Pathardi',
+    'Satpur MIDC',
+    'Nashik Road / Deolali',
+    'Other / Specify Area',
+  ],
+  // Kolhapur (530)
+  530: [
+    'Rajarampuri',
+    'Shahupuri',
+    'Tarabai Park',
+    'Laxmipuri / Bindu Chowk',
+    'Gandhinagar',
+    'Kasba Bawada',
+    'Other / Specify Area',
+  ],
+  // Amravati (503)
+  503: [
+    'Rajapeth',
+    'Camp / Civil Lines',
+    'Badnera',
+    'Gadge Nagar',
+    'Dastur Nagar',
+    'Rukhmini Nagar',
+    'Other / Specify Area',
+  ],
+  // Latur (524)
+  524: [
+    'Gandhi Chowk / Subhash Chowk',
+    'Shivaji Nagar',
+    'Ausa Road',
+    'Barshi Road / MIDC',
+    'Nandi Stop / Ambajogai Road',
+    'Other / Specify Area',
+  ],
+  // Solapur (526)
+  526: [
+    'Navi Peth / Balives',
+    'Saat Rasta / Civil Hospital Area',
+    'Jule Solapur',
+    'Ashok Chowk / Kumtha Naka',
+    'Hotgi Road MIDC',
+    'Other / Specify Area',
+  ],
+  // Chhatrapati Sambhajinagar (515)
+  515: [
+    'CIDCO (N-1 to N-12)',
+    'Connaught Place / Town Centre',
+    'Kranti Chowk / Station Road',
+    'Jalna Road / Seven Hills',
+    'Beed Bypass / Garkheda',
+    'Waluj MIDC / Shendra MIDC',
+    'Other / Specify Area',
+  ],
+  // Sangli (531)
+  531: [
+    'Vishrambag',
+    'Gaonbhag / Sangli City',
+    'Kupwad MIDC',
+    'Madhavnagar',
+    'Other / Specify Area',
+  ],
+  // Satara (527)
+  527: [
+    'Powai Naka',
+    'Rajwada',
+    'Godoli',
+    'Sadar Bazar',
+    'Karanje Peth',
+    'Other / Specify Area',
+  ],
+  // Ahmednagar / Ahilyanagar (522)
+  522: [
+    'Savedi',
+    'Station Road / Camp',
+    'Delhi Gate / Kotla',
+    'Pipeline Road',
+    'MIDC Nagapur',
+    'Other / Specify Area',
+  ],
+  // Akola (501)
+  501: [
+    'Civil Lines',
+    'Kaulkhed',
+    'Gorakshan Road',
+    'Jatharpeth',
+    'Old City',
+    'Other / Specify Area',
+  ],
+  // Delhi NCT
+  141: ['Connaught Place', 'Karol Bagh', 'Paharganj', 'Daryaganj', 'Other / Specify Area'],
+  142: ['Chanakyapuri', 'Barakhamba Road', 'Lodhi Estate', 'India Gate Area', 'Other / Specify Area'],
+  143: ['Hauz Khas', 'Saket', 'Greater Kailash', 'Lajpat Nagar', 'Vasant Kunj', 'Other / Specify Area'],
+  // Bengaluru Urban (572)
+  572: [
+    'Koramangala',
+    'Indiranagar',
+    'Whitefield',
+    'Jayanagar / JP Nagar',
+    'HSR Layout',
+    'Electronic City',
+    'Malleshwaram / Rajajinagar',
+    'Hebbal / Yelahanka',
+    'Other / Specify Area',
+  ],
+  // Mysuru (577)
+  577: ['Vijayanagar', 'Kuvempunagar', 'Jayalakshmipuram', 'Gokulam', 'Other / Specify Area'],
+  // Ahmedabad (474)
+  474: ['Navrangpura', 'Satellite / Bodakdev', 'Vastrapur', 'Maninagar', 'SG Highway', 'Other / Specify Area'],
+  // Surat (492)
+  492: ['Adajan', 'Vesu / VIP Road', 'Athwa Lines', 'Varachha', 'Piplod', 'Other / Specify Area'],
+};
+
+export function getCitiesForDistrict(districtCode: number): string[] {
+  return (
+    CITIES_BY_DISTRICT[districtCode] || [
+      'City / Town Centre',
+      'Civil Lines / Cantonment',
+      'Suburban Area',
+      'Industrial / MIDC Area',
+      'Rural / Taluka Area',
+      'Other / Specify Area',
+    ]
+  );
+}
+

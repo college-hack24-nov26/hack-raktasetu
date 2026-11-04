@@ -1,0 +1,74 @@
+flowchart LR
+    classDef actorStyle fill:#2563eb,stroke:#1d4ed8,color:#ffffff;
+    classDef ucStyle fill:#f8fafc,stroke:#64748b,color:#0f172a;
+
+    Patient(["Patient / Requester"]):::actorStyle
+    Donor(["Voluntary Donor"]):::actorStyle
+    OrgStaff(["Blood Bank Staff"]):::actorStyle
+    Clinician(["Clinical Staff"]):::actorStyle
+    SysAdmin(["System Administrator"]):::actorStyle
+
+    subgraph UC_Patient ["Patient Use Cases"]
+        UC_P1["Search Available Blood Centres"]:::ucStyle
+        UC_P2["Create Emergency Blood Request"]:::ucStyle
+        UC_P3["Track Fulfillment Lifecycle"]:::ucStyle
+        UC_P4["Acknowledge Unit Receipt at Hospital"]:::ucStyle
+    end
+
+    subgraph UC_Donor ["Donor Use Cases"]
+        UC_D1["Register Profile & Health Self-Assessment"]:::ucStyle
+        UC_D2["Toggle Realtime GPS Location Sharing"]:::ucStyle
+        UC_D3["Receive & Respond to Matching Invitations"]:::ucStyle
+        UC_D4["View Donation Certificate & History"]:::ucStyle
+    end
+
+    subgraph UC_BloodBank ["Blood Bank Operations"]
+        UC_B1["Evaluate Stock & Reserve Units"]:::ucStyle
+        UC_B2["Identify Shortfall & Request Donor Matching"]:::ucStyle
+        UC_B3["Review Admin-Released Candidates"]:::ucStyle
+        UC_B4["Send Outreach Invitations to Released Donors"]:::ucStyle
+        UC_B5["Issue & Dispatch Handover Manifest"]:::ucStyle
+    end
+
+    subgraph UC_Clinical ["Clinical & Laboratory Workflow"]
+        UC_C1["Screen Donor & Record Deferral"]:::ucStyle
+        UC_C2["Record Phlebotomy Bleed & Bag ID"]:::ucStyle
+        UC_C3["Conduct TTI & Immunohematology Tests"]:::ucStyle
+        UC_C4["Execute Clinical Release into Available Stock"]:::ucStyle
+    end
+
+    subgraph UC_Admin ["System Admin Workflow"]
+        UC_A1["Review & Approve Blood Centre Applications"]:::ucStyle
+        UC_A2["Monitor Emergency Requests & Matching Queue"]:::ucStyle
+        UC_A3["Execute Deterministic Matching Algorithm"]:::ucStyle
+        UC_A4["Review Ranked Donors & Release Approved List"]:::ucStyle
+        UC_A5["Live Geographic Donor Fleet Monitoring"]:::ucStyle
+    end
+
+    Patient --> UC_P1
+    Patient --> UC_P2
+    Patient --> UC_P3
+    Patient --> UC_P4
+
+    Donor --> UC_D1
+    Donor --> UC_D2
+    Donor --> UC_D3
+    Donor --> UC_D4
+
+    OrgStaff --> UC_B1
+    OrgStaff --> UC_B2
+    OrgStaff --> UC_B3
+    OrgStaff --> UC_B4
+    OrgStaff --> UC_B5
+
+    Clinician --> UC_C1
+    Clinician --> UC_C2
+    Clinician --> UC_C3
+    Clinician --> UC_C4
+
+    SysAdmin --> UC_A1
+    SysAdmin --> UC_A2
+    SysAdmin --> UC_A3
+    SysAdmin --> UC_A4
+    SysAdmin --> UC_A5
+

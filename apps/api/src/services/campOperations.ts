@@ -135,6 +135,28 @@ export class CampOperationsService {
     return { camp, membership, campStaffAssignment };
   }
 
+  /**
+   * Helper: check caller's authorized read access to camp details, operational metrics, and attendance.
+   * Authorized viewers:
+   * - Platform Admin
+   * - Active member of the camp's parent organisation (ORG_ADMIN, CLINICAL_STAFF, COLLECTION_STAFF, CAMP_COORDINATOR, INVENTORY_STAFF)
+   * - Assigned camp staff (active assignment, or historical assignment for COMPLETED camps)
+   * - Designated camp creator
+   */
+  public static checkCampReadAccess(
+    camp: any,
+    membership: any,
+    campStaffAssignment: any,
+    caller?: CallerUser
+  ): boolean {
+    if (!caller) return false;
+    if (caller.role === 'ADMIN') return true;
+    if (membership && membership.isActive) return true;
+    if (campStaffAssignment && (campStaffAssignment.isActive || camp.status === 'COMPLETED')) return true;
+    if (camp.createdById === caller.id) return true;
+    return false;
+  }
+
   // ====================================================
   // 1. CAMP MANAGEMENT & READINESS
   // ====================================================
@@ -215,23 +237,27 @@ export class CampOperationsService {
   static async getCampDetails(campId: string, caller?: CallerUser) {
     const { camp, membership, campStaffAssignment } = await this.getCampWithOrgCheck(campId, caller);
 
-    const isMember = membership && membership.isActive;
-    const isCampStaff = Boolean(campStaffAssignment);
-    const isPlatformAdmin = caller?.role === 'ADMIN';
+    const hasReadAccess = this.checkCampReadAccess(camp, membership, campStaffAssignment, caller);
 
     // Public callers cannot view unapproved or rejected camps
-    if (!isMember && !isCampStaff && !isPlatformAdmin && camp.status !== 'APPROVED' && camp.status !== 'COMPLETED') {
+    if (!hasReadAccess && camp.status !== 'APPROVED' && camp.status !== 'COMPLETED') {
       throw new Error('Camp not found.');
+    }
+
+    if (caller && !hasReadAccess) {
+      throw new Error('Permission denied: You do not have access to this camp.');
     }
 
     // Include operational summary counts and blood collection analytics for members or assigned camp staff
     let counts = null;
     let analytics = null;
-    if (isMember || isCampStaff || isPlatformAdmin) {
+    if (hasReadAccess) {
       analytics = await this.getCampAnalytics(campId, caller);
       counts = {
         registeredDonors: analytics.registeredDonors,
         checkedInDonors: analytics.checkedInDonors,
+        awaitingCounselling: analytics.awaitingCounselling,
+        awaitingScreening: analytics.awaitingScreening,
         clinicallyCleared: analytics.clearedScreeningDonors,
         completedDonations: analytics.completedDonations,
       };
@@ -250,13 +276,13 @@ export class CampOperationsService {
         districtCode: camp.districtCode,
         stateCode: camp.stateCode,
         expectedDonors: camp.expectedDonors,
-        coordinatorContact: isMember || isCampStaff || isPlatformAdmin ? camp.coordinatorContact : undefined,
+        coordinatorContact: hasReadAccess ? camp.coordinatorContact : undefined,
         status: camp.status,
         isReadyForCollection: camp.isReadyForCollection,
         readinessVerifiedAt: camp.readinessVerifiedAt,
-        readinessVerifiedBy: isMember || isCampStaff || isPlatformAdmin ? camp.readinessVerifiedBy : undefined,
-        readinessChecklist: isMember || isCampStaff || isPlatformAdmin ? camp.readinessChecklist : undefined,
-        readinessNotes: isMember || isCampStaff || isPlatformAdmin ? camp.readinessNotes : undefined,
+        readinessVerifiedBy: hasReadAccess ? camp.readinessVerifiedBy : undefined,
+        readinessChecklist: hasReadAccess ? camp.readinessChecklist : undefined,
+        readinessNotes: hasReadAccess ? camp.readinessNotes : undefined,
         organisation: camp.organisation
           ? {
               id: camp.organisation.id,
@@ -277,11 +303,13 @@ export class CampOperationsService {
   static async getCampAnalytics(campId: string, caller?: CallerUser) {
     const { camp, membership, campStaffAssignment } = await this.getCampWithOrgCheck(campId, caller);
 
-    const isMember = membership && membership.isActive;
-    const isCampStaff = Boolean(campStaffAssignment);
-    const isPlatformAdmin = caller?.role === 'ADMIN';
+    const hasReadAccess = this.checkCampReadAccess(camp, membership, campStaffAssignment, caller);
 
-    if (!isMember && !isCampStaff && !isPlatformAdmin && camp.status !== 'APPROVED' && camp.status !== 'COMPLETED') {
+    if (caller && !hasReadAccess) {
+      throw new Error('Permission denied: You do not have access to this camp analytics.');
+    }
+
+    if (!hasReadAccess && camp.status !== 'APPROVED' && camp.status !== 'COMPLETED') {
       throw new Error('Camp not found.');
     }
 
@@ -391,13 +419,33 @@ export class CampOperationsService {
       return 'UNKNOWN';
     };
 
+    // Fetch all donor_registrations records for this camp
+    let donorRegistrations: any[] = [];
+    try {
+      donorRegistrations = await prisma.$queryRawUnsafe(`
+        SELECT id, registration_number, donor_user_id, workflow_status, current_step,
+               counselling_status, screening_status, medical_decision, collection_status,
+               volume_ml, unit_number, barcode,
+               donor_details->>'bloodGroup' as blood_group, created_at
+        FROM donor_registrations
+        WHERE camp_id = $1
+      `, campId);
+    } catch (regErr) {
+      console.warn('[CampOperationsService] Could not query donor_registrations for analytics:', regErr);
+    }
+
     let totalRegistered = 0;
     let totalCheckedIn = 0;
+    let totalAwaitingCounselling = 0;
+    let totalAwaitingScreening = 0;
     let totalScreened = 0;
     let totalCleared = 0;
     let totalDeferred = 0;
     let totalCompletedDonations = 0;
     let totalVolumeMl = 0;
+    let totalConfirmedUnits = 0;
+
+    const countedUserIds = new Set<string>();
 
     for (const att of attendances) {
       if (att.status === 'CANCELLED') continue;
@@ -406,6 +454,7 @@ export class CampOperationsService {
       const metrics = groupMetricsMap.get(groupKey)!;
 
       totalRegistered++;
+      if (att.userId) countedUserIds.add(att.userId);
       metrics.registeredDonors++;
 
       if (att.status === 'CHECKED_IN') {
@@ -431,7 +480,51 @@ export class CampOperationsService {
       }
     }
 
-    let totalConfirmedUnits = 0;
+    for (const dr of donorRegistrations) {
+      const isAlreadyCounted = dr.donor_user_id && countedUserIds.has(dr.donor_user_id);
+      if (!isAlreadyCounted) {
+        totalRegistered++;
+        if (dr.donor_user_id) countedUserIds.add(dr.donor_user_id);
+        const groupKey = normalizeGroupKey(dr.blood_group);
+        const metrics = groupMetricsMap.get(groupKey)!;
+        metrics.registeredDonors++;
+      }
+
+      // Tally workflow stages
+      if (dr.workflow_status === 'COUNSELLING_PENDING' || dr.workflow_status === 'COUNSELLING_IN_PROGRESS') {
+        totalAwaitingCounselling++;
+      } else if (dr.workflow_status === 'SCREENING_PENDING') {
+        totalAwaitingScreening++;
+      }
+
+      // If registered via wizard and not already counted via attendance screening
+      if (!isAlreadyCounted) {
+        if (dr.workflow_status === 'CLEARED_FOR_COLLECTION' || dr.medical_decision === 'FIT') {
+          totalCleared++;
+          totalScreened++;
+        } else if (dr.workflow_status === 'DEFERRED' || dr.counselling_status === 'DEFERRED' || dr.screening_status === 'DEFERRED') {
+          totalDeferred++;
+          totalScreened++;
+        } else if (dr.workflow_status === 'COLLECTION_COMPLETED' || dr.collection_status === 'COMPLETED' || dr.collection_status === 'COLLECTED') {
+          totalCompletedDonations++;
+          const vol = dr.volume_ml ? Number(dr.volume_ml) : 450;
+          totalVolumeMl += vol;
+          const groupKey = normalizeGroupKey(dr.blood_group);
+          const metrics = groupMetricsMap.get(groupKey)!;
+          metrics.completedDonations++;
+          metrics.totalVolumeMl += vol;
+          if (dr.unit_number) {
+            totalConfirmedUnits++;
+            metrics.confirmedUnits++;
+          }
+          if (dr.medical_decision === 'FIT') {
+            totalCleared++;
+            totalScreened++;
+          }
+        }
+      }
+    }
+
     let totalAwaitingDispatch = 0;
     let totalDispatched = 0;
     let totalReceived = 0;
@@ -476,23 +569,33 @@ export class CampOperationsService {
     return {
       registeredDonors: totalRegistered,
       checkedInDonors: totalCheckedIn,
+      checkedIn: totalCheckedIn,
+      awaitingCounselling: totalAwaitingCounselling,
+      awaitingScreening: totalAwaitingScreening,
       screenedDonors: totalScreened,
       clearedScreeningDonors: totalCleared,
+      clinicallyCleared: totalCleared,
       deferredScreeningDonors: totalDeferred,
       completedDonations: totalCompletedDonations,
       totalVolumeMl,
       totalVolumeLiters: Number((totalVolumeMl / 1000).toFixed(2)),
       confirmedUnits: totalConfirmedUnits,
+      totalConfirmedUnits,
       awaitingDispatchUnits: totalAwaitingDispatch,
       dispatchedUnits: totalDispatched,
       receivedUnits: totalReceived,
       processingUnits: totalProcessing,
       releasedUnits: totalReleased,
       expectedDonors,
+      targetDonations: expectedDonors,
       targetCompletionPercentage,
+      targetProgressPercent: targetCompletionPercentage,
       handoverDiscrepancies: unresolvedDiscrepancies,
       byBloodGroup: Array.from(groupMetricsMap.values()),
       bloodGroups: Array.from(groupMetricsMap.values()),
+      bloodGroupBreakdown: Object.fromEntries(
+        Array.from(groupMetricsMap.entries()).map(([k, v]) => [k, v.confirmedUnits])
+      ),
     };
   }
 
@@ -558,7 +661,7 @@ export class CampOperationsService {
       });
 
       return campRecord;
-    });
+    }, { timeout: 15000, maxWait: 10000 });
 
     await prisma.auditLog.create({
       data: {
@@ -595,6 +698,10 @@ export class CampOperationsService {
 
     if (camp.status !== 'APPROVED') {
       throw new Error(`Cannot register attendance for a camp in status "${camp.status}". Camp must be APPROVED first.`);
+    }
+
+    if (!camp.isReadyForCollection) {
+      throw new Error('Camp is not ready for operations: Operational readiness must be verified before attendance registration.');
     }
 
     const isStaff = (membership && membership.isActive) || (campStaffAssignment && campStaffAssignment.isActive);
@@ -733,7 +840,7 @@ export class CampOperationsService {
       });
 
       return record;
-    });
+    }, { timeout: 15000, maxWait: 10000 });
 
     await prisma.auditLog.create({
       data: {
@@ -760,6 +867,10 @@ export class CampOperationsService {
 
     if (camp.status !== 'APPROVED') {
       throw new Error(`Cannot check in donors for a camp in status "${camp.status}". Camp must be APPROVED first.`);
+    }
+
+    if (!camp.isReadyForCollection) {
+      throw new Error('Camp is not ready for operations: Operational readiness must be verified before checking in donors.');
     }
 
     const isOrgStaff = membership && membership.isActive && ['ORG_ADMIN', 'COLLECTION_STAFF', 'CLINICAL_STAFF', 'INVENTORY_STAFF'].includes(membership.role);
@@ -812,7 +923,7 @@ export class CampOperationsService {
       });
 
       return rec;
-    });
+    }, { timeout: 15000, maxWait: 10000 });
 
     await prisma.auditLog.create({
       data: {
@@ -904,17 +1015,14 @@ export class CampOperationsService {
   static async listAttendances(campId: string, caller: CallerUser) {
     const { camp, membership, campStaffAssignment } = await this.getCampWithOrgCheck(campId, caller);
 
-    const isMember = membership && membership.isActive;
-    const isCampStaff = campStaffAssignment && campStaffAssignment.isActive;
-    const isPlatformAdmin = caller.role === 'ADMIN';
+    const hasReadAccess = this.checkCampReadAccess(camp, membership, campStaffAssignment, caller);
 
-    if (!isMember && !isCampStaff && !isPlatformAdmin) {
+    if (!hasReadAccess) {
       throw new Error('Permission denied: Only authorised organisation members or assigned camp staff can view the attendance roster.');
     }
 
     const isClinicalStaff =
       caller.role === 'ADMIN' ||
-      membership?.role === 'ORG_ADMIN' ||
       membership?.role === 'CLINICAL_STAFF' ||
       campStaffAssignment?.role === 'CLINICAL_STAFF';
 
@@ -923,7 +1031,8 @@ export class CampOperationsService {
       membership?.role === 'ORG_ADMIN' ||
       membership?.role === 'COLLECTION_STAFF' ||
       campStaffAssignment?.role === 'CAMP_COORDINATOR' ||
-      campStaffAssignment?.role === 'COLLECTION_STAFF';
+      campStaffAssignment?.role === 'COLLECTION_STAFF' ||
+      campStaffAssignment?.role === 'CAMP_ADMIN';
 
     const attendances = await prisma.campAttendance.findMany({
       where: { campId },
@@ -1017,7 +1126,9 @@ export class CampOperationsService {
         cancelledAt: a.cancelledAt,
         donorPhone: canViewPhone
           ? a.donorPhone
-          : a.donorPhone.slice(0, 4) + '******' + a.donorPhone.slice(-2),
+          : a.donorPhone
+          ? a.donorPhone.slice(0, 4) + '******' + a.donorPhone.slice(-2)
+          : '******',
         screening: a.screening,
         donationEvent: a.donationEvent
           ? {
@@ -1069,12 +1180,17 @@ export class CampOperationsService {
       throw new Error(`Cannot perform clinical screening for a camp in status "${camp.status}". Camp must be APPROVED first.`);
     }
 
+    if (!camp.isReadyForCollection) {
+      throw new Error('Camp is not ready for operations: Operational readiness must be verified before beginning clinical evaluations.');
+    }
+
     const isClinicalAuthorized =
-      (membership && membership.isActive && ['CLINICAL_STAFF', 'ORG_ADMIN'].includes(membership.role)) ||
+      caller.role === 'ADMIN' ||
+      (membership && membership.isActive && membership.role === 'CLINICAL_STAFF') ||
       (campStaffAssignment && campStaffAssignment.isActive && campStaffAssignment.role === 'CLINICAL_STAFF');
 
     if (!isClinicalAuthorized) {
-      throw new Error('Permission denied: Only CLINICAL_STAFF or ORG_ADMIN can perform clinical screening.');
+      throw new Error('Permission denied: Only qualified CLINICAL_STAFF can perform clinical screening and medical fitness decisions.');
     }
 
     const attendance = await prisma.campAttendance.findUnique({
@@ -1148,7 +1264,7 @@ export class CampOperationsService {
       });
 
       return record;
-    });
+    }, { timeout: 15000, maxWait: 10000 });
 
     // Record audit trail (excluding sensitive clinical notes)
     await prisma.auditLog.create({
@@ -1183,11 +1299,11 @@ export class CampOperationsService {
 
     const isClinicalAuthorized =
       caller.role === 'ADMIN' ||
-      (membership && membership.isActive && ['CLINICAL_STAFF', 'ORG_ADMIN'].includes(membership.role)) ||
+      (membership && membership.isActive && membership.role === 'CLINICAL_STAFF') ||
       (campStaffAssignment && campStaffAssignment.isActive && campStaffAssignment.role === 'CLINICAL_STAFF');
 
     if (!isClinicalAuthorized) {
-      throw new Error('Permission denied: Only CLINICAL_STAFF or ORG_ADMIN can amend clinical screening.');
+      throw new Error('Permission denied: Only qualified CLINICAL_STAFF can amend clinical screening.');
     }
 
     if (!input.amendmentReason || !input.amendmentReason.trim()) {
@@ -1271,6 +1387,10 @@ export class CampOperationsService {
       throw new Error(`Cannot record donation events for a camp in status "${camp.status}". Camp must be APPROVED first.`);
     }
 
+    if (!camp.isReadyForCollection) {
+      throw new Error('Camp is not ready for operations: Operational readiness must be verified before recording donations.');
+    }
+
     const isDonationAuthorized =
       (membership && membership.isActive && ['COLLECTION_STAFF', 'ORG_ADMIN'].includes(membership.role)) ||
       (campStaffAssignment && campStaffAssignment.isActive && campStaffAssignment.role === 'COLLECTION_STAFF');
@@ -1283,7 +1403,11 @@ export class CampOperationsService {
       where: { id: attendanceId },
       include: {
         screening: true,
-        donationEvent: true,
+        donationEvent: {
+          include: {
+            collectionUnit: true,
+          },
+        },
       },
     });
 
@@ -1292,7 +1416,13 @@ export class CampOperationsService {
     }
 
     if (attendance.donationEvent) {
-      throw new Error('A donation event has already been recorded for this attendance record. Duplicate recordings are prohibited.');
+      if (attendance.donationEvent.collectionUnit) {
+        throw new Error('A collection unit has already been confirmed and registered for this donation event. Duplicate recordings are prohibited.');
+      }
+      if (attendance.donationEvent.outcome === 'COMPLETED') {
+        throw new Error('A donation event has already been recorded for this attendance record. Duplicate recordings are prohibited.');
+      }
+      // If the donation was previously marked NOT_PERFORMED, authorized collection staff may legitimately complete or update it
     }
 
     if (input.outcome === 'COMPLETED') {
@@ -1306,25 +1436,41 @@ export class CampOperationsService {
       throw new Error('Valid blood group is required to record a donation event.');
     }
 
-    // Atomic creation of donation event, donor profile update, and real-time events
+    // Atomic creation or update of donation event, donor profile update, and real-time events
     const donationEvent = await prisma.$transaction(async (tx) => {
-      const event = await tx.donationEvent.create({
-        data: {
-          campId,
-          attendanceId,
-          screeningId: attendance.screening?.id || null,
-          donorUserId: attendance.userId,
-          bloodGroup: bloodGroupValue,
-          donationType: input.donationType || 'WHOLE_BLOOD',
-          outcome: input.outcome,
-          volumeMl: input.volumeMl || (input.outcome === 'COMPLETED' ? 450 : null),
-          adverseReaction: !!input.adverseReaction,
-          adverseReactionNotes: input.adverseReactionNotes || null,
-          recordedBy: caller.id,
-          performedAt: new Date(),
-          notes: input.notes || null,
-        },
-      });
+      const event = attendance.donationEvent
+        ? await tx.donationEvent.update({
+            where: { id: attendance.donationEvent.id },
+            data: {
+              screeningId: attendance.screening?.id || attendance.donationEvent.screeningId,
+              bloodGroup: bloodGroupValue,
+              donationType: input.donationType || attendance.donationEvent.donationType || 'WHOLE_BLOOD',
+              outcome: input.outcome,
+              volumeMl: input.volumeMl || (input.outcome === 'COMPLETED' ? 450 : null),
+              adverseReaction: !!input.adverseReaction,
+              adverseReactionNotes: input.adverseReactionNotes || null,
+              recordedBy: caller.id,
+              performedAt: new Date(),
+              notes: input.notes || null,
+            },
+          })
+        : await tx.donationEvent.create({
+            data: {
+              campId,
+              attendanceId,
+              screeningId: attendance.screening?.id || null,
+              donorUserId: attendance.userId,
+              bloodGroup: bloodGroupValue,
+              donationType: input.donationType || 'WHOLE_BLOOD',
+              outcome: input.outcome,
+              volumeMl: input.volumeMl || (input.outcome === 'COMPLETED' ? 450 : null),
+              adverseReaction: !!input.adverseReaction,
+              adverseReactionNotes: input.adverseReactionNotes || null,
+              recordedBy: caller.id,
+              performedAt: new Date(),
+              notes: input.notes || null,
+            },
+          });
 
       let nextEligibleDate: string | null = null;
       if (input.outcome === 'COMPLETED') {
@@ -1377,6 +1523,23 @@ export class CampOperationsService {
             reason: 'Post-donation 90-day recovery interval',
           },
         });
+
+        // Sync donor_registrations table if record exists
+        if (attendance.userId) {
+          try {
+            await tx.$executeRawUnsafe(`
+              UPDATE donor_registrations
+              SET
+                collection_status = 'COLLECTED',
+                workflow_status = 'COLLECTION_COMPLETED',
+                volume_ml = COALESCE($1, volume_ml, 450),
+                updated_at = NOW()
+              WHERE camp_id = $2 AND donor_user_id = $3
+            `, input.volumeMl || 450, campId, attendance.userId);
+          } catch {
+            // Best-effort sync
+          }
+        }
       }
 
       // Publish camp donation completed / recorded event
@@ -1666,16 +1829,17 @@ export class CampOperationsService {
   static async listCampStaff(campId: string, caller: CallerUser) {
     const { camp, membership, campStaffAssignment } = await this.getCampWithOrgCheck(campId, caller);
 
-    const isMember = membership && membership.isActive;
-    const isCampStaff = campStaffAssignment && campStaffAssignment.isActive;
-    const isPlatformAdmin = caller.role === 'ADMIN';
+    const hasReadAccess = this.checkCampReadAccess(camp, membership, campStaffAssignment, caller);
 
-    if (!isMember && !isCampStaff && !isPlatformAdmin) {
+    if (!hasReadAccess) {
       throw new Error('Permission denied: You are not authorized to view staff for this camp.');
     }
 
     const staff = await prisma.campStaffAssignment.findMany({
-      where: { campId, isActive: true },
+      where: {
+        campId,
+        ...(camp.status === 'COMPLETED' ? {} : { isActive: true }),
+      },
       include: {
         user: {
           select: { id: true, name: true, phoneNumber: true },
@@ -1699,11 +1863,9 @@ export class CampOperationsService {
   ) {
     const { camp, membership, campStaffAssignment } = await this.getCampWithOrgCheck(campId, caller);
 
-    const isOrgStaff = membership && membership.isActive && ['ORG_ADMIN', 'COLLECTION_STAFF'].includes(membership.role);
-    const isCampStaff = campStaffAssignment && campStaffAssignment.isActive;
-    const isPlatformAdmin = caller.role === 'ADMIN';
+    const hasLookupAccess = this.checkCampReadAccess(camp, membership, campStaffAssignment, caller);
 
-    if (!isOrgStaff && !isCampStaff && !isPlatformAdmin) {
+    if (!hasLookupAccess) {
       throw new Error('Permission denied: Only authorised camp staff or parent blood-bank administrators can perform donor lookup.');
     }
 
@@ -1975,6 +2137,12 @@ export class CampOperationsService {
       if (!campMap.has(c.id)) {
         const mem = memberships.find((m) => m.organisationId === c.organisationId);
         const isApproved = c.status === 'APPROVED' || c.status === 'COMPLETED';
+        let resolvedRole: string = 'CAMP_COORDINATOR';
+        if (mem?.role === 'ORG_ADMIN') resolvedRole = 'ORG_ADMIN';
+        else if (mem?.role === 'CLINICAL_STAFF') resolvedRole = 'CLINICAL_STAFF';
+        else if (mem?.role === 'COLLECTION_STAFF') resolvedRole = 'COLLECTION_STAFF';
+        else if (mem?.role) resolvedRole = mem.role;
+
         campMap.set(c.id, {
           campId: c.id,
           campCode: c.campCode,
@@ -1986,7 +2154,7 @@ export class CampOperationsService {
           isReadyForCollection: c.isReadyForCollection,
           isOperational: isApproved,
           parentOrganisation: c.organisation,
-          role: mem?.role === 'ORG_ADMIN' ? 'CAMP_COORDINATOR' : 'COLLECTION_STAFF',
+          role: resolvedRole,
           assignmentSource: 'PARENT_BANK_STAFF',
           assignedAt: c.createdAt,
         });
@@ -2154,16 +2322,12 @@ export class CampOperationsService {
   ) {
     const { camp, membership, campStaffAssignment } = await this.getCampWithOrgCheck(campId, caller);
 
-    if (campStaffAssignment && campStaffAssignment.role === 'CAMP_COORDINATOR') {
-      throw new Error('Permission denied: Camp Coordinators cannot submit camp handover manifests. Final blood transfer is restricted to authorized Collection Staff and Camp Admin.');
-    }
-
-    const isOrgStaff = membership && membership.isActive && ['ORG_ADMIN', 'COLLECTION_STAFF'].includes(membership.role);
-    const isCampStaff = campStaffAssignment && campStaffAssignment.isActive && ['CAMP_ADMIN', 'COLLECTION_STAFF'].includes(campStaffAssignment.role);
+    const isCampAdmin = campStaffAssignment && campStaffAssignment.isActive && campStaffAssignment.role === 'CAMP_ADMIN';
+    const isOrgAdmin = membership && membership.isActive && membership.role === 'ORG_ADMIN';
     const isPlatformAdmin = caller.role === 'ADMIN';
 
-    if (!isOrgStaff && !isCampStaff && !isPlatformAdmin) {
-      throw new Error('Permission denied: Only authorized Collection Staff or Camp Admin can submit camp handover manifests.');
+    if (!isCampAdmin && !isOrgAdmin && !isPlatformAdmin) {
+      throw new Error('Permission denied: Only camp admin or blood bank admin can create handover manifests. Final blood transfer is restricted to Camp Admin.');
     }
 
     if (camp.status === 'COMPLETED' || camp.status === 'CANCELLED') {

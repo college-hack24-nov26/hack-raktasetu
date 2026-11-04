@@ -469,7 +469,7 @@ export default function DonorDashboardPage() {
                 </span>
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Blood requests where patients have specifically selected your voluntary profile for coordination.
+                Official donation coordination invitations dispatched by designated Blood Banks for pending blood requests.
               </p>
             </div>
           </div>
@@ -561,8 +561,15 @@ export default function DonorDashboardPage() {
                         )}
 
                         {req.hospitalAddress && (
-                          <div className="text-xs text-slate-500 mt-0.5">{req.hospitalAddress}</div>
+                          <div className="text-xs text-slate-500 mt-0.5">
+                            📍 Recommended Centre: {req.hospitalName} ({req.hospitalAddress})
+                          </div>
                         )}
+
+                        <div className="text-[11px] text-amber-900 bg-amber-50/80 p-2 rounded-lg border border-amber-200 mt-2">
+                          <strong>Medical Safety Directive:</strong> Please coordinate voluntary donation through the accredited blood centre above.
+                          Under strict medical safety regulations, blood must never be delivered directly to the patient or hospital ward.
+                        </div>
 
                         {req.message && (
                           <div className="text-xs italic text-slate-600 bg-slate-50 p-2.5 rounded-lg mt-2 border border-slate-100 max-w-xl">
@@ -570,24 +577,29 @@ export default function DonorDashboardPage() {
                           </div>
                         )}
 
-                        {/* Unlocked Requester Contacts after Acceptance */}
-                        {myStatus === 'ACCEPTED' && req.requesterPhone && (
+                        {/* Accredited Centre Coordination after Acceptance */}
+                        {myStatus === 'ACCEPTED' && (
                           <div className="mt-3 p-3 rounded-xl bg-emerald-50 border border-emerald-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                             <div className="text-xs text-emerald-950">
-                              <span className="font-bold block">Authorized Requester Contact:</span>
+                              <span className="font-bold block">Designated Blood Centre Venue:</span>
                               <span className="font-medium text-emerald-900">
-                                {req.requesterName || 'Requester'} • Tel: {req.requesterPhone}
+                                {req.hospitalName} {req.hospitalPhone ? `• Tel: ${req.hospitalPhone}` : ''}
                               </span>
+                              <p className="text-[11px] text-emerald-800 mt-1">
+                                Notice: Acceptance coordinates your arrival at this accredited centre. Formal clinical screening and phlebotomy will be conducted by authorized clinical staff upon check-in.
+                              </p>
                             </div>
-                            <a
-                              href={`tel:${req.requesterPhone}`}
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition-colors shadow-xs shrink-0 self-start sm:self-auto"
-                            >
-                              <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 20 20">
-                                <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 4V3z" />
-                              </svg>
-                              <span>Call Requester</span>
-                            </a>
+                            {req.hospitalPhone && (
+                              <a
+                                href={`tel:${req.hospitalPhone}`}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition-colors shadow-xs shrink-0 self-start sm:self-auto"
+                              >
+                                <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 20 20">
+                                  <path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 4V3z" />
+                                </svg>
+                                <span>Call Blood Centre</span>
+                              </a>
+                            )}
                           </div>
                         )}
                       </div>

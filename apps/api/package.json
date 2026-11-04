@@ -16,6 +16,8 @@
     "test:phase8": "tsx src/test-phase8-patient-search.ts",
     "test:phase9": "tsx src/test-phase9-hospital-disposition.ts",
     "test:scenario3": "tsx src/test-platform-admin-application-review.ts",
+    "test:location": "tsx src/test-donor-location.ts",
+    "test:intake-processing": "tsx src/test-intake-to-processing.ts",
     "seed:demo": "tsx src/seed-demo.ts",
     "cleanup:demo": "tsx src/cleanup-demo.ts",
     "start": "node dist/server.js",
@@ -26,12 +28,14 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "pdfkit": "^0.20.2",
     "ws": "^8.22.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
     "@types/node": "^20.17.19",
+    "@types/pdfkit": "^0.17.7",
     "@types/ws": "^8.18.2",
     "prisma": "^6.4.1",
     "tsx": "^4.19.3",

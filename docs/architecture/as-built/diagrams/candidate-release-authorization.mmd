@@ -1,0 +1,28 @@
+flowchart TD
+    classDef sysAdminGate fill:#dc2626,stroke:#991b1b,color:#ffffff;
+    classDef bankGate fill:#2563eb,stroke:#1d4ed8,color:#ffffff;
+    classDef blockedGate fill:#6b7280,stroke:#374151,color:#ffffff;
+
+    subgraph MatchingEngineOutput ["1. Matching Engine Raw Output"]
+        RawPool["Ranked Donor Candidates\n- Donor UUID\n- Full Name & Phone\n- Exact GPS Coordinates"]
+    end
+
+    subgraph SystemAdminGate ["2. System Admin Authorization Gate"]
+        AdminReview["Platform Admin Review\n(Role == ADMIN)\n- Verifies Shortfall Justification\n- Checks Search Scope Integrity"]:::sysAdminGate
+        ExplicitReleaseAction["Admin Explicit Release Action\n- POST /admin/donor-matching/requests/:id/release\n- Selects subset of candidates\n- Immutable Audit Log Created"]:::sysAdminGate
+    end
+
+    subgraph BloodBankGate ["3. Requesting Blood Bank Gate"]
+        RequestingBankAccess["Designated Blood Bank Staff\n(ORG_ADMIN / INVENTORY_STAFF)\n- Checks orgId == assignedBankId\n- Masks Phone & Exact GPS\n- Enables Outreach Trigger"]:::bankGate
+    end
+
+    subgraph PrivacyBoundaries ["4. Strict Privacy Restrictions"]
+        OtherBanksBlocked["Other Blood Banks\n- HTTP 403 Forbidden\n- Zero Access to Candidates"]:::blockedGate
+        PatientBlocked["Patients / Public\n- No Candidate Visibility\n- Only Sees 'Matching Active'"]:::blockedGate
+    end
+
+    RawPool --> AdminReview --> ExplicitReleaseAction
+    ExplicitReleaseAction --> RequestingBankAccess
+    ExplicitReleaseAction -.->|Blocked| OtherBanksBlocked
+    ExplicitReleaseAction -.->|Blocked| PatientBlocked
+

@@ -76,8 +76,27 @@ export class HandoverService {
     input: CreateManifestInput
   ) {
     const membership = await this.verifyOrgMembership(sendingOrgId, caller);
-    if (!['ORG_ADMIN', 'COLLECTION_STAFF'].includes(membership.role)) {
-      throw new Error('Permission denied: Only collection staff or organisation admins can prepare handover manifests.');
+
+    // Prompt Requirement: For camp handover manifests, strictly restrict to CAMP_ADMIN or ORG_ADMIN.
+    // Coordinator, clinical staff, and ordinary collection staff without CAMP_ADMIN cannot raise manifests.
+    if (input.campId) {
+      const campAssignment = await prisma.campStaffAssignment.findFirst({
+        where: {
+          campId: input.campId,
+          userId: caller.id,
+          isActive: true,
+        },
+      });
+      const isCampAdmin = campAssignment?.role === 'CAMP_ADMIN';
+      const isOrgAdmin = membership.role === 'ORG_ADMIN' || (caller as any).role === 'ADMIN';
+
+      if (!isCampAdmin && !isOrgAdmin) {
+        throw new Error('Permission denied: Only Camp Admin or Blood Bank Administrator can create and manage camp handover manifests.');
+      }
+    } else {
+      if (!['ORG_ADMIN', 'COLLECTION_STAFF'].includes(membership.role) && (caller as any).role !== 'ADMIN') {
+        throw new Error('Permission denied: Only collection staff or organisation admins can prepare handover manifests.');
+      }
     }
 
     // Validate receiving organisation

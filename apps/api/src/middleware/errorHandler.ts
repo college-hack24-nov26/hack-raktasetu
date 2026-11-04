@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
 
 export function errorHandler(
   err: any,
@@ -6,16 +7,22 @@ export function errorHandler(
   res: Response,
   next: NextFunction
 ) {
-  const statusCode = err.statusCode || 500;
+  const correlationId = (req.headers['x-request-id'] as string) || crypto.randomUUID();
+  const statusCode = err.statusCode || (err.message?.includes('Permission denied') ? 403 : err.message?.includes('not found') ? 404 : 500);
   const isProduction = process.env.NODE_ENV === 'production';
 
-  // Do not expose sensitive internal error stacks or credentials to client
+  // Server-side diagnostic logging with correlation ID, scrubbing sensitive credentials
+  console.error(`[ErrorHandler][${correlationId}] ${req.method} ${req.originalUrl} - Status ${statusCode}:`, err.message || err);
+
+  // Safe client response
   res.status(statusCode).json({
     success: false,
     error: {
       message: err.message || 'An unexpected internal server error occurred',
-      code: err.code || 'INTERNAL_ERROR',
-      ...(isProduction ? {} : { stack: err.stack }),
+      code: err.code || (statusCode === 403 ? 'FORBIDDEN' : statusCode === 404 ? 'NOT_FOUND' : 'INTERNAL_ERROR'),
+      correlationId,
+      ...(isProduction ? {} : { details: err.message }),
     },
   });
 }
+

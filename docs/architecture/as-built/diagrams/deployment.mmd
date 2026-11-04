@@ -1,0 +1,42 @@
+flowchart TB
+    classDef devBox fill:#0f172a,stroke:#334155,color:#ffffff;
+    classDef runtimeBox fill:#1e3a8a,stroke:#1d4ed8,color:#ffffff;
+    classDef cloudBox fill:#065f46,stroke:#047857,color:#ffffff;
+
+    subgraph HostDevMachine ["Local Development Environment (Windows 11 / Node v22.14.0)"]
+        subgraph WebProcess ["Web Frontend Runtime"]
+            NextServer["Next.js Development Server\nProcess: next dev (PID 8860)\nListener: http://localhost:3000\nProxy: None (direct authFetch to :4000)"]:::devBox
+        end
+
+        subgraph ApiProcess ["API Backend Runtime"]
+            NodeAPI["Node.js / tsx watch Server\nProcess: tsx watch src/server.ts (PID 13536)\nHTTP Listener: http://localhost:4000\nWS Listener: ws://localhost:4000/ws\nCORS: Allowed from :3000, localhost"]:::devBox
+        end
+
+        subgraph MobileProcess ["Mobile Development Runtime"]
+            ExpoCLI["Metro Bundler / Expo CLI\nCommand: npm run start\nListener: http://localhost:8081\nAndroid Target: http://10.0.2.2:4000/api/v1"]:::devBox
+        end
+    end
+
+    subgraph CloudInfra ["Cloud Infrastructure Tier"]
+        subgraph NeonCloud ["Neon Serverless PostgreSQL (Oregon AWS)"]
+            PgPool["PgBouncer Pooled: DATABASE_URL (Port 6543)\nDirect Session: DIRECT_URL (Port 5432)\nSSL: require"]:::cloudBox
+        end
+
+        subgraph ExternalAPIs ["Third-Party External Services"]
+            eRaktKoshPortal["e-RaktKosh Portal\n(https://eraktkosh.mohfw.gov.in)"]:::cloudBox
+            MetaGraphAPI["Meta Graph API\n(https://graph.facebook.com/v18.0)"]:::cloudBox
+            MapboxCDN["Mapbox GL Vector Tile CDN\n(https://api.mapbox.com)"]:::cloudBox
+        end
+    end
+
+    %% Communication paths
+    NextServer -->|"Client Browser REST calls"| NodeAPI
+    NextServer -->|"Browser WebSocket (useRealtime)"| NodeAPI
+    NextServer -->|"Map vector tiles"| MapboxCDN
+
+    ExpoCLI -->|"Emulator HTTP / WS calls"| NodeAPI
+
+    NodeAPI -->|"Prisma Client Queries (ACID)"| PgPool
+    NodeAPI -->|"Stock Scraper (Axios / Cheerio)"| eRaktKoshPortal
+    NodeAPI -->|"WhatsApp Notifications"| MetaGraphAPI
+

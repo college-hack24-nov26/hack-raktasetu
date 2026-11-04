@@ -1,12 +1,13 @@
 'use client';
 
-import { useState, useEffect, Suspense, useMemo } from 'react';
+import { useState, useEffect, Suspense, useMemo, useRef, useCallback } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { ProcessingAndInventoryView } from './ProcessingAndInventoryView';
 import { HospitalIntegrationView } from './HospitalIntegrationView';
+import { LiveDonorMapView } from './LiveDonorMapView';
 import { useRealtime } from '../../hooks/useRealtime';
-import { authFetch } from '../../config/api';
+import { authFetch, safeJsonParse } from '../../config/api';
 import { notifyAuthChange } from '../../components/Header';
 import {
   IconDashboard,
@@ -22,7 +23,12 @@ import {
   IconApplications,
   IconLogOut,
   IconMenu,
+  IconMap,
+  IconUsers,
 } from '../../components/ui/Icons';
+import { BloodRequestOperationsView } from './BloodRequestOperationsView';
+import { DonorRegistryView } from './DonorRegistryView';
+import BloodBankLocationPicker from '../../components/map/BloodBankLocationPicker';
 
 export type OrgPortalTab =
   | 'overview'
@@ -32,10 +38,13 @@ export type OrgPortalTab =
   | 'lab'
   | 'handover'
   | 'requests'
+  | 'registry'
   | 'reports'
   | 'staff'
   | 'settings'
-  | 'applications';
+  | 'applications'
+  | 'donor-map'
+  | 'admin-requests';
 
 interface OrgMembership {
   membershipId: string;
@@ -45,6 +54,12 @@ interface OrgMembership {
   role: 'ORG_ADMIN' | 'INVENTORY_STAFF' | 'CLINICAL_STAFF' | 'COLLECTION_STAFF' | 'AUDITOR';
   status: string;
   isActive: boolean;
+  latitude?: number | null;
+  longitude?: number | null;
+  locationStatus?: string;
+  locationConfirmedAt?: string | null;
+  locationConfirmedBy?: string | null;
+  locationAddress?: string | null;
   assignedAt: string;
   permissions: string[];
 }
@@ -58,6 +73,8 @@ interface StaffMember {
   isActive: boolean;
   assignedAt: string;
   assignedBy: string | null;
+  phoneNumber?: string | null;
+  phone?: string | null;
 }
 
 interface CampItem {
@@ -76,7 +93,14 @@ interface CampItem {
   isReadyForCollection: boolean;
   readinessVerifiedAt?: string | null;
   readinessChecklist?: any;
+  readinessNotes?: string | null;
   createdAt?: string;
+  createdById?: string | null;
+  creator?: {
+    id: string;
+    name: string | null;
+    phoneNumber?: string | null;
+  } | null;
   organisation?: {
     id: string;
     orgCode: string;
@@ -227,6 +251,7 @@ function OrganisationPortalContent() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isPlatformAdmin, setIsPlatformAdmin] = useState(false);
+  const [currentUser, setCurrentUser] = useState<any>(null);
 
   // Proposal filter & detail states
   const [proposalFilter, setProposalFilter] = useState<'ALL' | 'PROPOSED' | 'APPROVED' | 'REJECTED'>('PROPOSED');
@@ -291,6 +316,74 @@ function OrganisationPortalContent() {
   const [campStaffError, setCampStaffError] = useState<string | null>(null);
   const [campStaffSuccess, setCampStaffSuccess] = useState<string | null>(null);
 
+  // Camp Operational Readiness Modal States
+  const [showReadinessModal, setShowReadinessModal] = useState(false);
+  const [selectedCampForReadiness, setSelectedCampForReadiness] = useState<CampItem | null>(null);
+  const [readinessChecklist, setReadinessChecklist] = useState({
+    staffAssigned: true,
+    coldChainVerified: true,
+    emergencyKitAvailable: true,
+    consumablesStocked: true,
+    spaceSanitized: true,
+  });
+  const [readinessNotes, setReadinessNotes] = useState('');
+  const [savingReadiness, setSavingReadiness] = useState(false);
+  const [readinessError, setReadinessError] = useState<string | null>(null);
+  const [readinessSuccess, setReadinessSuccess] = useState<string | null>(null);
+
+  const handleVerifyReadiness = async (markReady: boolean) => {
+    if (!selectedCampForReadiness) return;
+    try {
+      setSavingReadiness(true);
+      setReadinessError(null);
+      setReadinessSuccess(null);
+
+      const res = await authFetch(`/api/v1/camps/${selectedCampForReadiness.id}/readiness`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          isReadyForCollection: markReady,
+          readinessChecklist,
+          readinessNotes: readinessNotes.trim() || undefined,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error?.message || 'Failed to update camp readiness.');
+      }
+
+      setReadinessSuccess(
+        markReady
+          ? 'Camp operational readiness successfully verified! Authorised operations are now unlocked.'
+          : 'Camp operational readiness was revoked/suspended.'
+      );
+
+      setCamps((prev) =>
+        prev.map((c) =>
+          c.id === selectedCampForReadiness.id
+            ? {
+                ...c,
+                isReadyForCollection: markReady,
+                readinessVerifiedAt: markReady ? new Date().toISOString() : null,
+                readinessChecklist,
+                readinessNotes,
+              }
+            : c
+        )
+      );
+
+      setTimeout(() => {
+        setShowReadinessModal(false);
+        setReadinessSuccess(null);
+      }, 1200);
+    } catch (err: any) {
+      setReadinessError(err.message || 'Error saving camp operational readiness.');
+    } finally {
+      setSavingReadiness(false);
+    }
+  };
+
   // Traceability States
   const [collectionUnits, setCollectionUnits] = useState<CollectionUnitItem[]>([]);
   const [loadingUnits, setLoadingUnits] = useState(false);
@@ -354,6 +447,11 @@ function OrganisationPortalContent() {
 
   const [reconcileNotes, setReconcileNotes] = useState('');
   const [reconcilingLoading, setReconcilingLoading] = useState(false);
+  const [showLocationModal, setShowLocationModal] = useState<boolean>(false);
+  const [locationBannerDismissed, setLocationBannerDismissed] = useState<boolean>(false);
+  const [isSavingLocation, setIsSavingLocation] = useState<boolean>(false);
+  const [locationError, setLocationError] = useState<string | null>(null);
+  const [locationSuccessNotice, setLocationSuccessNotice] = useState<string | null>(null);
   const [handoverActionError, setHandoverActionError] = useState<string | null>(null);
   const [handoverActionSuccess, setHandoverActionSuccess] = useState<string | null>(null);
 
@@ -373,6 +471,7 @@ function OrganisationPortalContent() {
   useEffect(() => {
     try {
       const u = JSON.parse(localStorage.getItem('raktasetu_user') || 'null');
+      setCurrentUser(u);
       if (u?.role === 'ADMIN') {
         setIsPlatformAdmin(true);
       }
@@ -418,42 +517,73 @@ function OrganisationPortalContent() {
     }
   }, [activeOrg]);
 
-  // Real-time WebSocket hook
-  const { status: wsStatus, isLive, isPollingFallback } = useRealtime({
-    organisationId: activeOrg?.organisationId,
-    campId: selectedCampId || undefined,
-    enabled: Boolean(activeOrg?.organisationId),
-    onEvent: (event) => {
-      loadCollectionOverview();
-      if (
-        event.eventType.startsWith('component.') ||
-        event.eventType.startsWith('inventory.') ||
-        event.eventType.startsWith('storage.')
-      ) {
-        setInventoryRefreshSignal((prev) => prev + 1);
-        loadCollectionUnits();
-      } else if (event.eventType.startsWith('handover.')) {
-        loadManifests();
-        if (selectedManifestId) loadManifestDetail(selectedManifestId);
-        loadCollectionUnits();
-      } else if (event.eventType.startsWith('camp.')) {
-        loadCamps();
-        loadRoster();
-        if (event.eventType === 'camp.collection_unit_confirmed') {
-          loadCollectionUnits();
-        }
+  // Synchronize inventory when child views allocate stock
+  useEffect(() => {
+    const handleInventoryRefreshEvent = () => {
+      setInventoryRefreshSignal((prev) => prev + 1);
+      if (activeOrg) {
+        loadCollectionOverview();
       }
+    };
+    window.addEventListener('inventory:refresh', handleInventoryRefreshEvent);
+    return () => {
+      window.removeEventListener('inventory:refresh', handleInventoryRefreshEvent);
+    };
+  }, [activeOrg]);
 
-      setRealtimeNotice({
-        message: `Real-time: ${event.eventType.replace('.', ' → ')}`,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+  // Persist facility entrance location to backend and refresh active organisation state
+  const handleSaveLocation = async (loc: { latitude: number; longitude: number; address: string }) => {
+    if (!activeOrg) return;
+    try {
+      setIsSavingLocation(true);
+      setLocationError(null);
+
+      const res = await authFetch(`/api/v1/organisations/${activeOrg.organisationId}/location`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          latitude: loc.latitude,
+          longitude: loc.longitude,
+          locationAddress: loc.address || undefined,
+        }),
       });
 
-      setTimeout(() => {
-        setRealtimeNotice((curr) => (curr?.message.includes(event.eventType) ? null : curr));
-      }, 6000);
-    },
-  });
+      const data = await safeJsonParse(res);
+
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error?.message || `Failed to save location (HTTP ${res.status})`);
+      }
+
+      const updated = data.data;
+      setMemberships((prev) =>
+        prev.map((m, idx) =>
+          idx === activeOrgIndex
+            ? {
+                ...m,
+                latitude: updated.latitude,
+                longitude: updated.longitude,
+                locationAddress: updated.locationAddress,
+                locationStatus: updated.locationStatus,
+                locationConfirmedAt: updated.locationConfirmedAt,
+                locationConfirmedBy: updated.locationConfirmedBy,
+              }
+            : m
+        )
+      );
+
+      setShowLocationModal(false);
+      setLocationSuccessNotice(
+        `Facility entrance location successfully confirmed at ${Number(updated.latitude).toFixed(4)}° N, ${Number(updated.longitude).toFixed(4)}° E.`
+      );
+      setTimeout(() => setLocationSuccessNotice(null), 6000);
+    } catch (err: any) {
+      setLocationError(err.message || 'Error saving facility location.');
+      throw err;
+    } finally {
+      setIsSavingLocation(false);
+    }
+  };
+
+
 
   // Load user memberships
   useEffect(() => {
@@ -497,9 +627,12 @@ function OrganisationPortalContent() {
 
   useEffect(() => {
     if (isPlatformAdmin && memberships.length === 0) {
-      setActiveTab('applications');
+      const tabParam = searchParams.get('tab') as OrgPortalTab;
+      if (!tabParam) {
+        setActiveTab('applications');
+      }
     }
-  }, [isPlatformAdmin, memberships]);
+  }, [isPlatformAdmin, memberships, searchParams]);
 
   // Load applications for Platform Admin
   const loadApplications = async (statusFilter?: string) => {
@@ -1082,6 +1215,77 @@ function OrganisationPortalContent() {
     }
   };
 
+  // Real-time event debouncer to prevent rapid refresh loops on clustered events
+  const realtimeDebounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const pendingDomainsRef = useRef<{
+    inventory: boolean;
+    handover: boolean;
+    camps: boolean;
+    collectionUnits: boolean;
+  }>({ inventory: false, handover: false, camps: false, collectionUnits: false });
+
+  const handleRealtimeEvent = useCallback((event: any) => {
+    if (
+      event.eventType.startsWith('component.') ||
+      event.eventType.startsWith('inventory.') ||
+      event.eventType.startsWith('storage.') ||
+      event.eventType.startsWith('blood_request.allocated') ||
+      event.eventType === 'blood_request.status_changed'
+    ) {
+      pendingDomainsRef.current.inventory = true;
+    } else if (event.eventType.startsWith('handover.')) {
+      pendingDomainsRef.current.handover = true;
+      pendingDomainsRef.current.collectionUnits = true;
+    } else if (event.eventType.startsWith('camp.')) {
+      pendingDomainsRef.current.camps = true;
+      if (event.eventType === 'camp.collection_unit_confirmed') {
+        pendingDomainsRef.current.collectionUnits = true;
+      }
+    }
+
+    if (realtimeDebounceTimerRef.current) {
+      clearTimeout(realtimeDebounceTimerRef.current);
+    }
+
+    realtimeDebounceTimerRef.current = setTimeout(() => {
+      const d = pendingDomainsRef.current;
+      pendingDomainsRef.current = { inventory: false, handover: false, camps: false, collectionUnits: false };
+
+      if (d.inventory) {
+        setInventoryRefreshSignal((prev) => prev + 1);
+      }
+      if (d.handover) {
+        loadManifests();
+        if (selectedManifestId) loadManifestDetail(selectedManifestId);
+      }
+      if (d.camps) {
+        loadCamps();
+        loadRoster();
+      }
+      if (d.collectionUnits) {
+        loadCollectionUnits();
+      }
+      loadCollectionOverview();
+    }, 250);
+
+    setRealtimeNotice({
+      message: `Real-time: ${event.eventType.replace('.', ' → ')}`,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    });
+
+    setTimeout(() => {
+      setRealtimeNotice((curr) => (curr?.message.includes(event.eventType) ? null : curr));
+    }, 6000);
+  }, [loadCamps, loadCollectionOverview, loadCollectionUnits, loadManifestDetail, loadManifests, loadRoster, selectedManifestId]);
+
+  // Real-time WebSocket hook
+  const { status: wsStatus, isLive, isPollingFallback } = useRealtime({
+    organisationId: activeOrg?.organisationId,
+    campId: selectedCampId || undefined,
+    enabled: Boolean(activeOrg?.organisationId),
+    onEvent: handleRealtimeEvent,
+  });
+
   // Platform Admin review
   const handleReviewSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1104,7 +1308,13 @@ function OrganisationPortalContent() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error?.message || 'Review submission failed');
 
-      setReviewSuccessMessage(`Application ${reviewAction.toLowerCase()} successfully!`);
+      if (reviewAction === 'APPROVED') {
+        const orgCode = data.data?.organisation?.orgCode || '';
+        const adminPhone = selectedAppForReview.phone ? `(${selectedAppForReview.phone})` : '';
+        setReviewSuccessMessage(`Application approved successfully! Provisioned organisation "${orgCode || selectedAppForReview.hospitalName}" and activated Blood Bank Admin role for applicant ${adminPhone}.`);
+      } else {
+        setReviewSuccessMessage(`Application ${reviewAction.toLowerCase()} successfully!`);
+      }
       setSelectedAppForReview(null);
       setReviewNotesInput('');
       setCustomOrgCode('');
@@ -1130,10 +1340,15 @@ function OrganisationPortalContent() {
     { id: 'lab', label: 'Laboratory & Release', icon: IconLab, count: collectionOverview?.summary?.totalQuarantinedUnits, badgeColor: 'bg-blue-100 text-blue-800' },
     { id: 'handover', label: 'Handover & Receipt', icon: IconHandover, count: activeDiscrepanciesCount > 0 ? activeDiscrepanciesCount : manifests.length, badgeColor: activeDiscrepanciesCount > 0 ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-700' },
     { id: 'requests', label: 'Hospital Requests', icon: IconHospital },
+    { id: 'registry', label: 'Donor Registry', icon: IconUsers },
     { id: 'reports', label: 'Reports & Analytics', icon: IconReports },
     { id: 'staff', label: 'Staff & Access', icon: IconStaff, count: staff.length },
     { id: 'settings', label: 'Organisation Settings', icon: IconSettings },
-    ...(isPlatformAdmin ? [{ id: 'applications' as OrgPortalTab, label: 'Applications Review', icon: IconApplications, count: applications.filter((a) => a.status === 'PENDING').length, badgeColor: 'bg-purple-100 text-purple-800', adminOnly: true }] : []),
+    ...(isPlatformAdmin ? [
+      { id: 'admin-requests' as OrgPortalTab, label: 'Blood Request Operations', icon: IconHospital, adminOnly: true },
+      { id: 'donor-map' as OrgPortalTab, label: 'Live Donor Map', icon: IconMap, adminOnly: true },
+      { id: 'applications' as OrgPortalTab, label: 'Applications Review', icon: IconApplications, count: applications.filter((a) => a.status === 'PENDING').length, badgeColor: 'bg-purple-100 text-purple-800', adminOnly: true },
+    ] : []),
   ];
 
   if (loading) {
@@ -1277,6 +1492,16 @@ function OrganisationPortalContent() {
               <span className="hidden sm:inline">Refresh Data</span>
             </button>
 
+            {(isCollectionStaff || isClinicalStaff || isAdmin) && !isAuditor && (
+              <Link
+                href={`/camp/donor-registration?orgId=${activeOrg?.organisationId || ''}`}
+                className="px-3 py-1.5 bg-[#991b1b] hover:bg-[#7f1d1d] text-white text-xs font-bold rounded-xl transition-all shadow-xs cursor-pointer flex items-center gap-1"
+              >
+                <span>+</span>
+                <span className="hidden sm:inline">Register Donor</span>
+              </Link>
+            )}
+
             {isCollectionStaff && !isAuditor && (
               <Link
                 href="/organisation/register-camp"
@@ -1346,6 +1571,59 @@ function OrganisationPortalContent() {
 
         {/* Dynamic Page Workspace Content */}
         <main className="p-4 sm:px-6 space-y-6 max-w-7xl w-full mx-auto">
+          {/* Blood Bank Location Setup Reminder Banner for Unconfigured Banks */}
+          {activeOrg && activeOrg.locationStatus !== 'CONFIRMED' && !locationBannerDismissed && (
+            <div className="p-4 bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-200/80 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-xs">
+              <div className="flex items-start gap-3">
+                <div className="w-8 h-8 rounded-xl bg-amber-100 border border-amber-300 flex items-center justify-center text-amber-700 text-base shrink-0 mt-0.5">
+                  📍
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h4 className="text-xs font-bold text-amber-900">Facility Location Setup Required</h4>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-200 text-amber-900">
+                      Action Needed
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-amber-800 mt-0.5">
+                    Confirm your exact entrance coordinates so the system matching engine can compute donor proximity and emergency road routes for incoming requests.
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                {(isAdmin || isPlatformAdmin) && (
+                  <button
+                    type="button"
+                    onClick={() => setShowLocationModal(true)}
+                    className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-xl transition-all shadow-xs cursor-pointer"
+                  >
+                    Configure Facility Location
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setLocationBannerDismissed(true)}
+                  className="p-1.5 text-amber-700 hover:text-amber-900 rounded-lg hover:bg-amber-100/50 transition-colors cursor-pointer"
+                  title="Dismiss reminder"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+          )}
+
+          {locationSuccessNotice && (
+            <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-semibold flex items-center justify-between shadow-xs">
+              <span>✓ {locationSuccessNotice}</span>
+              <button
+                type="button"
+                onClick={() => setLocationSuccessNotice(null)}
+                className="text-emerald-700 hover:text-emerald-900 font-bold ml-2 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+          )}
           {/* ======================================================== */}
           {/* VIEW 1: OVERVIEW                                         */}
           {/* ======================================================== */}
@@ -1666,22 +1944,28 @@ function OrganisationPortalContent() {
                             </button>
 
                             {isPending && (isAdmin || isPlatformAdmin) && (
-                              <div className="flex items-center gap-1.5">
-                                <button
-                                  disabled={statusUpdatingCampId === proposal.id}
-                                  onClick={() => handleUpdateCampStatus(proposal.id, 'APPROVED')}
-                                  className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer shadow-xs"
-                                >
-                                  {statusUpdatingCampId === proposal.id ? 'Approving...' : '✓ Approve'}
-                                </button>
-                                <button
-                                  disabled={statusUpdatingCampId === proposal.id}
-                                  onClick={() => setProposalToReject(proposal)}
-                                  className="px-3 py-1.5 bg-red-100 hover:bg-red-200 disabled:opacity-50 text-red-800 text-xs font-bold rounded-xl transition-colors cursor-pointer"
-                                >
-                                  Reject
-                                </button>
-                              </div>
+                              (currentUser?.id && (proposal.createdById === currentUser.id || proposal.creator?.id === currentUser.id)) ? (
+                                <span className="text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-300 px-2.5 py-1 rounded-xl">
+                                  Awaiting Independent Admin Approval (Self-created)
+                                </span>
+                              ) : (
+                                <div className="flex items-center gap-1.5">
+                                  <button
+                                    disabled={statusUpdatingCampId === proposal.id}
+                                    onClick={() => handleUpdateCampStatus(proposal.id, 'APPROVED')}
+                                    className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer shadow-xs"
+                                  >
+                                    {statusUpdatingCampId === proposal.id ? 'Approving...' : '✓ Approve'}
+                                  </button>
+                                  <button
+                                    disabled={statusUpdatingCampId === proposal.id}
+                                    onClick={() => setProposalToReject(proposal)}
+                                    className="px-3 py-1.5 bg-red-100 hover:bg-red-200 disabled:opacity-50 text-red-800 text-xs font-bold rounded-xl transition-colors cursor-pointer"
+                                  >
+                                    Reject
+                                  </button>
+                                </div>
+                              )
                             )}
                           </div>
                         </div>
@@ -1783,7 +2067,7 @@ function OrganisationPortalContent() {
                         </div>
                       </div>
 
-                      <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
+                      <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between gap-2 flex-wrap">
                         <Link
                           href={`/camp/dashboard?campId=${camp.id}`}
                           className="px-3 py-1.5 bg-[#B91C32] hover:bg-[#9B1324] text-white text-xs font-bold rounded-xl transition-all shadow-xs cursor-pointer flex items-center gap-1"
@@ -1791,18 +2075,46 @@ function OrganisationPortalContent() {
                           <span>⛺ Open Workspace ↗</span>
                         </Link>
 
-                        {(isAdmin || isPlatformAdmin) && (
-                          <button
-                            onClick={() => {
-                              setSelectedCampId(camp.id);
-                              setShowCampStaffModal(true);
-                              loadCampStaff(camp.id);
-                            }}
-                            className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold rounded-xl transition-colors cursor-pointer"
-                          >
-                            👥 Staff Roster
-                          </button>
-                        )}
+                        <div className="flex items-center gap-1.5">
+                          {camp.status === 'APPROVED' && (isAdmin || isPlatformAdmin) && (
+                            <button
+                              onClick={() => {
+                                setSelectedCampForReadiness(camp);
+                                setReadinessChecklist({
+                                  staffAssigned: camp.readinessChecklist?.staffAssigned ?? true,
+                                  coldChainVerified: camp.readinessChecklist?.coldChainVerified ?? true,
+                                  emergencyKitAvailable: camp.readinessChecklist?.emergencyKitAvailable ?? true,
+                                  consumablesStocked: camp.readinessChecklist?.consumablesStocked ?? true,
+                                  spaceSanitized: camp.readinessChecklist?.spaceSanitized ?? true,
+                                });
+                                setReadinessNotes(camp.readinessNotes || '');
+                                setReadinessError(null);
+                                setReadinessSuccess(null);
+                                setShowReadinessModal(true);
+                              }}
+                              className={`px-2.5 py-1.5 text-xs font-bold rounded-xl transition-colors cursor-pointer flex items-center gap-1 ${
+                                camp.isReadyForCollection
+                                  ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200'
+                                  : 'bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200'
+                              }`}
+                            >
+                              <span>{camp.isReadyForCollection ? '✓ Ready' : '🔍 Verify Readiness'}</span>
+                            </button>
+                          )}
+
+                          {(isAdmin || isPlatformAdmin) && (
+                            <button
+                              onClick={() => {
+                                setSelectedCampId(camp.id);
+                                setShowCampStaffModal(true);
+                                loadCampStaff(camp.id);
+                              }}
+                              className="px-2.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold rounded-xl transition-colors cursor-pointer"
+                            >
+                              👥 Staff
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
                   ))}
@@ -2340,6 +2652,19 @@ function OrganisationPortalContent() {
           )}
 
           {/* ======================================================== */}
+          {/* VIEW: DONOR REGISTRY                                     */}
+          {/* ======================================================== */}
+          {activeTab === 'registry' && activeOrg && (
+            <div className="space-y-6">
+              <DonorRegistryView
+                organisationId={activeOrg.organisationId}
+                userRole={activeOrg.role}
+                isAdmin={isAdmin}
+              />
+            </div>
+          )}
+
+          {/* ======================================================== */}
           {/* VIEW 8: REPORTS & FULL BLOOD-GROUP ANALYTICS             */}
           {/* ======================================================== */}
           {activeTab === 'reports' && (
@@ -2566,44 +2891,57 @@ function OrganisationPortalContent() {
                         <th className="p-3">Staff Name / ID</th>
                         <th className="p-3">Assigned Role</th>
                         <th className="p-3 text-center">Status</th>
+                        <th className="p-3">Mobile Number</th>
                         <th className="p-3">Assigned Date</th>
                         <th className="p-3 text-right">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {staff.map((m) => (
-                        <tr key={m.membershipId} className="hover:bg-slate-50/60">
-                          <td className="p-3">
-                            <div className="font-bold text-slate-900">{m.name || 'Staff User'}</div>
-                            <div className="text-[10px] font-mono text-slate-500">{m.userId}</div>
-                          </td>
-                          <td className="p-3">
-                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-800">
-                              {m.role}
-                            </span>
-                          </td>
-                          <td className="p-3 text-center">
-                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                              m.isActive ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-600'
-                            }`}>
-                              {m.isActive ? 'Active' : 'Inactive'}
-                            </span>
-                          </td>
-                          <td className="p-3 text-slate-500 text-[11px]">
-                            {new Date(m.assignedAt).toLocaleDateString()}
-                          </td>
-                          <td className="p-3 text-right">
-                            {isAdmin && m.isActive && (
-                              <button
-                                onClick={() => handleDeactivateStaff(m.membershipId)}
-                                className="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-700 rounded-lg text-[10px] font-bold cursor-pointer"
-                              >
-                                Revoke
-                              </button>
-                            )}
+                      {staff.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="p-8 text-center text-xs text-slate-500">
+                            <div className="font-semibold text-slate-700 mb-1">No staff members found</div>
+                            <p className="text-[11px] text-slate-400">Use the form above to assign authorized staff to this organisation.</p>
                           </td>
                         </tr>
-                      ))}
+                      ) : (
+                        staff.map((m) => (
+                          <tr key={m.membershipId} className="hover:bg-slate-50/60">
+                            <td className="p-3">
+                              <div className="font-bold text-slate-900">{m.name || 'Staff User'}</div>
+                              <div className="text-[10px] font-mono text-slate-500">{m.userId}</div>
+                            </td>
+                            <td className="p-3">
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-800">
+                                {m.role}
+                              </span>
+                            </td>
+                            <td className="p-3 text-center">
+                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                m.isActive ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-600'
+                              }`}>
+                                {m.isActive ? 'Active' : 'Inactive'}
+                              </span>
+                            </td>
+                            <td className="p-3 text-slate-600 font-mono text-[11px]">
+                              {m.phoneNumber || m.phone || 'Not recorded'}
+                            </td>
+                            <td className="p-3 text-slate-500 text-[11px]">
+                              {m.assignedAt ? new Date(m.assignedAt).toLocaleDateString() : 'Not recorded'}
+                            </td>
+                            <td className="p-3 text-right">
+                              {isAdmin && m.isActive && (
+                                <button
+                                  onClick={() => handleDeactivateStaff(m.membershipId)}
+                                  className="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-700 rounded-lg text-[10px] font-bold cursor-pointer"
+                                >
+                                  Revoke
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        ))
+                      )}
                     </tbody>
                   </table>
                 </div>
@@ -2621,6 +2959,104 @@ function OrganisationPortalContent() {
                 <p className="text-xs text-slate-500 mt-0.5">
                   CDSCO accreditation details, biological licensing, and system configuration.
                 </p>
+              </div>
+
+              {/* Blood Bank Exact Facility Location & Proximity Setup */}
+              <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-sm font-bold text-slate-900">Blood Bank Location &amp; Proximity Setup</h3>
+                      {activeOrg?.locationStatus === 'CONFIRMED' ? (
+                        <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200 flex items-center gap-1">
+                          <span>✓</span> Confirmed
+                        </span>
+                      ) : (
+                        <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200 flex items-center gap-1">
+                          <span>⚠️</span> Unconfigured
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1 max-w-xl">
+                      Verified geographic coordinates representing your <strong>facility entrance or donor reception desk</strong>. This reference point is used by the system matching engine to calculate straight-line donor proximity and emergency road travel directions.
+                    </p>
+                  </div>
+
+                  {(isAdmin || isPlatformAdmin) ? (
+                    <button
+                      type="button"
+                      onClick={() => setShowLocationModal(true)}
+                      className="px-4 py-2 bg-slate-900 hover:bg-black text-white text-xs font-bold rounded-xl transition-all shadow-xs shrink-0 cursor-pointer"
+                    >
+                      {activeOrg?.locationStatus === 'CONFIRMED' ? 'Edit Facility Location' : 'Configure Facility Location'}
+                    </button>
+                  ) : (
+                    <div className="text-[11px] text-slate-400 italic">
+                      Requires ORG_ADMIN role
+                    </div>
+                  )}
+                </div>
+
+                {locationSuccessNotice && (
+                  <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-semibold flex items-center justify-between">
+                    <span>✓ {locationSuccessNotice}</span>
+                    <button
+                      type="button"
+                      onClick={() => setLocationSuccessNotice(null)}
+                      className="text-emerald-700 hover:text-emerald-900 font-bold ml-2 cursor-pointer"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+
+                {locationError && (
+                  <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl text-xs font-semibold flex items-center justify-between">
+                    <span>⚠️ {locationError}</span>
+                    <button
+                      type="button"
+                      onClick={() => setLocationError(null)}
+                      className="text-rose-600 hover:text-rose-800 font-bold ml-2 cursor-pointer"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-4 border-t border-slate-100 text-xs">
+                  <div>
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Entrance Coordinates</span>
+                    {activeOrg?.latitude !== null && activeOrg?.latitude !== undefined && activeOrg?.longitude !== null && activeOrg?.longitude !== undefined ? (
+                      <span className="font-mono font-bold text-slate-800">
+                        {Number(activeOrg.latitude).toFixed(6)}° N, {Number(activeOrg.longitude).toFixed(6)}° E
+                      </span>
+                    ) : (
+                      <span className="text-slate-400 italic">Coordinates unconfigured</span>
+                    )}
+                  </div>
+
+                  <div>
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Reception Address / Landmark</span>
+                    <span className="text-slate-700 font-medium truncate block">
+                      {activeOrg?.locationAddress || 'Not specified'}
+                    </span>
+                  </div>
+
+                  <div>
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Last Confirmation</span>
+                    <span className="text-slate-600 font-medium block">
+                      {activeOrg?.locationConfirmedAt
+                        ? new Date(activeOrg.locationConfirmedAt).toLocaleString('en-IN', {
+                            month: 'short',
+                            day: 'numeric',
+                            year: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })
+                        : 'Never confirmed'}
+                    </span>
+                  </div>
+                </div>
               </div>
 
               <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs space-y-4">
@@ -2719,6 +3155,20 @@ function OrganisationPortalContent() {
                 ))}
               </div>
             </div>
+          )}
+
+          {/* ======================================================== */}
+          {/* VIEW: LIVE DONOR MAP (Platform Admin Exclusive)          */}
+          {/* ======================================================== */}
+          {activeTab === 'donor-map' && (
+            <LiveDonorMapView isPlatformAdmin={isPlatformAdmin} />
+          )}
+
+          {/* ======================================================== */}
+          {/* VIEW: PLATFORM BLOOD REQUEST OPERATIONS (Admin Exclusive)*/}
+          {/* ======================================================== */}
+          {activeTab === 'admin-requests' && isPlatformAdmin && (
+            <BloodRequestOperationsView isPlatformAdmin={isPlatformAdmin} />
           )}
         </main>
       </div>
@@ -2844,6 +3294,17 @@ function OrganisationPortalContent() {
 
               <button
                 onClick={() => {
+                  setActiveTab('registry');
+                  setShowMobileMore(false);
+                }}
+                className="p-3 bg-slate-50 hover:bg-slate-100 rounded-xl border border-slate-200 text-left flex items-center gap-2 text-slate-700"
+              >
+                <IconUsers size={16} className="text-slate-500" />
+                <span>Donor Registry</span>
+              </button>
+
+              <button
+                onClick={() => {
                   setActiveTab('reports');
                   setShowMobileMore(false);
                 }}
@@ -2876,16 +3337,41 @@ function OrganisationPortalContent() {
               </button>
 
               {isPlatformAdmin && (
-                <button
-                  onClick={() => {
-                    setActiveTab('applications');
-                    setShowMobileMore(false);
-                  }}
-                  className="p-3 bg-purple-50 hover:bg-purple-100 rounded-xl border border-purple-200 text-left flex items-center gap-2 text-purple-900 col-span-2"
-                >
-                  <IconApplications size={16} className="text-purple-700" />
-                  <span>Onboarding Applications</span>
-                </button>
+                <>
+                  <button
+                    onClick={() => {
+                      setActiveTab('admin-requests');
+                      setShowMobileMore(false);
+                    }}
+                    className="p-3 bg-rose-50 hover:bg-rose-100 rounded-xl border border-rose-200 text-left flex items-center gap-2 text-rose-900 col-span-2 cursor-pointer"
+                  >
+                    <IconHospital size={16} className="text-[#C51F3A]" />
+                    <div>
+                      <div className="font-bold text-xs">Blood Request Operations</div>
+                      <div className="text-[10px] text-rose-600">Platform-wide request routing & operations</div>
+                    </div>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setActiveTab('donor-map');
+                      setShowMobileMore(false);
+                    }}
+                    className="p-3 bg-red-50 hover:bg-red-100 rounded-xl border border-red-200 text-left flex items-center gap-2 text-red-900 col-span-2"
+                  >
+                    <IconMap size={16} className="text-[#C51F3A]" />
+                    <span>Live Donor Map (Admin)</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setActiveTab('applications');
+                      setShowMobileMore(false);
+                    }}
+                    className="p-3 bg-purple-50 hover:bg-purple-100 rounded-xl border border-purple-200 text-left flex items-center gap-2 text-purple-900 col-span-2"
+                  >
+                    <IconApplications size={16} className="text-purple-700" />
+                    <span>Onboarding Applications</span>
+                  </button>
+                </>
               )}
             </div>
 
@@ -2943,9 +3429,17 @@ function OrganisationPortalContent() {
                   <span className="text-slate-800">{reviewingProposal.coordinatorContact || 'Not provided'}</span>
                 </div>
               </div>
-              <div>
-                <span className="font-bold text-slate-500 uppercase text-[10px] block">Expected Donors</span>
-                <span className="text-slate-800 font-bold">{reviewingProposal.expectedDonors} expected</span>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <span className="font-bold text-slate-500 uppercase text-[10px] block">Expected Donors</span>
+                  <span className="text-slate-800 font-bold">{reviewingProposal.expectedDonors} expected</span>
+                </div>
+                <div>
+                  <span className="font-bold text-slate-500 uppercase text-[10px] block">Created / Proposed By</span>
+                  <span className="text-slate-800 font-medium">
+                    {reviewingProposal.creator?.name || 'Staff Member'} {reviewingProposal.createdById === currentUser?.id ? '(You)' : ''}
+                  </span>
+                </div>
               </div>
             </div>
             <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
@@ -2956,24 +3450,30 @@ function OrganisationPortalContent() {
                 Close
               </button>
               {reviewingProposal.status === 'PROPOSED' && (isAdmin || isPlatformAdmin) && (
-                <>
-                  <button
-                    onClick={() => {
-                      const p = reviewingProposal;
-                      setReviewingProposal(null);
-                      setProposalToReject(p);
-                    }}
-                    className="px-4 py-2 bg-red-100 hover:bg-red-200 text-red-800 rounded-xl text-xs font-bold cursor-pointer"
-                  >
-                    Reject Proposal
-                  </button>
-                  <button
-                    onClick={() => handleUpdateCampStatus(reviewingProposal.id, 'APPROVED')}
-                    className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-bold cursor-pointer shadow-xs"
-                  >
-                    ✓ Approve &amp; Activate Camp
-                  </button>
-                </>
+                (currentUser?.id && (reviewingProposal.createdById === currentUser.id || reviewingProposal.creator?.id === currentUser.id)) ? (
+                  <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl text-amber-900 text-xs font-semibold">
+                    Awaiting independent parent blood bank administrator approval. Because you created this camp proposal, another authorised administrator must review and approve it to prevent conflict of interest.
+                  </div>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => {
+                        const p = reviewingProposal;
+                        setReviewingProposal(null);
+                        setProposalToReject(p);
+                      }}
+                      className="px-4 py-2 bg-red-100 hover:bg-red-200 text-red-800 rounded-xl text-xs font-bold cursor-pointer"
+                    >
+                      Reject Proposal
+                    </button>
+                    <button
+                      onClick={() => handleUpdateCampStatus(reviewingProposal.id, 'APPROVED')}
+                      className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-bold cursor-pointer shadow-xs"
+                    >
+                      ✓ Approve &amp; Activate Camp
+                    </button>
+                  </>
+                )
               )}
             </div>
           </div>
@@ -3018,6 +3518,147 @@ function OrganisationPortalContent() {
               >
                 Confirm Rejection
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Camp Operational Readiness Verification Modal */}
+      {showReadinessModal && selectedCampForReadiness && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-200">
+              <div>
+                <span className="text-[10px] font-mono font-bold bg-amber-50 text-amber-700 px-2 py-0.5 rounded">
+                  Operational Readiness Boundary
+                </span>
+                <h3 className="text-base font-bold text-slate-900 mt-1">Verify Camp Operational Readiness</h3>
+              </div>
+              <button
+                onClick={() => setShowReadinessModal(false)}
+                className="text-slate-400 hover:text-slate-600 font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-3 bg-slate-50 border border-slate-100 rounded-xl space-y-1 text-xs">
+              <div className="flex justify-between">
+                <span className="text-slate-500">Camp:</span>
+                <span className="font-bold text-slate-900">{selectedCampForReadiness.title}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Camp Code:</span>
+                <span className="font-mono font-bold text-slate-800">{selectedCampForReadiness.campCode}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Date &amp; Venue:</span>
+                <span className="text-slate-700">{new Date(selectedCampForReadiness.targetDate).toLocaleDateString()} | {selectedCampForReadiness.venue}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Current Status:</span>
+                <span className={`font-bold ${selectedCampForReadiness.isReadyForCollection ? 'text-emerald-700' : 'text-amber-700'}`}>
+                  {selectedCampForReadiness.isReadyForCollection ? '✓ READY TO OPERATE' : '⏳ READINESS PENDING'}
+                </span>
+              </div>
+            </div>
+
+            {readinessError && (
+              <div className="p-3 bg-red-50 border border-red-200 text-red-800 text-xs rounded-xl font-medium">
+                ⚠ {readinessError}
+              </div>
+            )}
+            {readinessSuccess && (
+              <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs rounded-xl font-medium">
+                ✓ {readinessSuccess}
+              </div>
+            )}
+
+            <div>
+              <h4 className="text-xs font-bold text-slate-800 mb-2">Mandatory Operational Prerequisites Checklist:</h4>
+              <div className="space-y-2.5">
+                {[
+                  { id: 'staffAssigned', label: 'Staff Assigned & Briefed', desc: 'Camp Coordinator, Clinical, and Collection staff roster assigned and confirmed.' },
+                  { id: 'coldChainVerified', label: 'Cold Chain Equipment Verified', desc: 'Blood transport boxes, ice packs, and temperature data-loggers calibrated and operating.' },
+                  { id: 'emergencyKitAvailable', label: 'Emergency Medical Kit Available', desc: 'Oxygen, resuscitation kit, epinephrine, IV fluids, and donor adverse reaction supplies ready.' },
+                  { id: 'consumablesStocked', label: 'Blood Bags & Consumables Stocked', desc: 'CPDA/SAGM blood bags, vacutainer tubes, needles, and phlebotomy disinfectants stocked.' },
+                  { id: 'spaceSanitized', label: 'Venue Layout & Sanitization Verified', desc: 'Screening privacy cubicles, donation donor beds, and post-donation recovery area sanitized.' },
+                ].map((item) => (
+                  <label
+                    key={item.id}
+                    className="flex items-start gap-3 p-2.5 rounded-xl border border-slate-100 hover:bg-slate-50/80 cursor-pointer transition-colors"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={(readinessChecklist as any)[item.id]}
+                      onChange={(e) =>
+                        setReadinessChecklist((prev) => ({
+                          ...prev,
+                          [item.id]: e.target.checked,
+                        }))
+                      }
+                      className="mt-0.5 rounded text-[#B91C32] focus:ring-[#B91C32]"
+                    />
+                    <div>
+                      <p className="text-xs font-bold text-slate-900">{item.label}</p>
+                      <p className="text-[11px] text-slate-500">{item.desc}</p>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Readiness Observations &amp; Verification Notes:
+              </label>
+              <textarea
+                value={readinessNotes}
+                onChange={(e) => setReadinessNotes(e.target.value)}
+                placeholder="e.g. Inspected on-site storage; 3 phlebotomy beds setup; emergency physician present."
+                rows={2}
+                className="w-full text-xs p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-hidden"
+              />
+            </div>
+
+            <div className="pt-3 border-t border-slate-200 flex items-center justify-between gap-3">
+              {selectedCampForReadiness.isReadyForCollection ? (
+                <button
+                  type="button"
+                  onClick={() => handleVerifyReadiness(false)}
+                  disabled={savingReadiness}
+                  className="px-3 py-2 bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-bold rounded-xl transition-colors cursor-pointer border border-amber-200"
+                >
+                  {savingReadiness ? 'Processing...' : 'Suspend / Revoke Readiness'}
+                </button>
+              ) : (
+                <span className="text-[11px] text-slate-400">All 5 checks mandatory</span>
+              )}
+
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowReadinessModal(false)}
+                  className="px-4 py-2 border border-slate-200 text-slate-600 hover:bg-slate-50 text-xs font-bold rounded-xl transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleVerifyReadiness(true)}
+                  disabled={
+                    savingReadiness ||
+                    !readinessChecklist.staffAssigned ||
+                    !readinessChecklist.coldChainVerified ||
+                    !readinessChecklist.emergencyKitAvailable ||
+                    !readinessChecklist.consumablesStocked ||
+                    !readinessChecklist.spaceSanitized
+                  }
+                  className="px-4 py-2 bg-[#B91C32] hover:bg-[#9B1324] text-white text-xs font-bold rounded-xl transition-all shadow-xs cursor-pointer disabled:opacity-50"
+                >
+                  {savingReadiness ? 'Verifying...' : 'Mark Ready to Operate ✓'}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -3607,6 +4248,37 @@ function OrganisationPortalContent() {
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* ==================================================== */}
+      {/* MODAL: Facility Entrance Location Picker             */}
+      {/* ==================================================== */}
+      {showLocationModal && activeOrg && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto">
+          <div className="relative w-full max-w-3xl bg-white rounded-3xl shadow-2xl overflow-hidden my-8 animate-in fade-in zoom-in-95 duration-200">
+            <BloodBankLocationPicker
+              initialLatitude={activeOrg.latitude}
+              initialLongitude={activeOrg.longitude}
+              initialAddress={activeOrg.locationAddress || ''}
+              districtName={activeOrg.organisationName}
+              isSaving={isSavingLocation}
+              confirmButtonLabel={
+                activeOrg.locationStatus === 'CONFIRMED'
+                  ? 'Update Confirmed Location'
+                  : 'Confirm Facility Location'
+              }
+              onCancel={() => {
+                if (!isSavingLocation) {
+                  setShowLocationModal(false);
+                  setLocationError(null);
+                }
+              }}
+              onLocationConfirmed={async ({ latitude, longitude, address }) => {
+                await handleSaveLocation({ latitude, longitude, address });
+              }}
+            />
+          </div>
         </div>
       )}
     </div>

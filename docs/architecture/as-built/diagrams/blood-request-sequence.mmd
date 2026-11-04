@@ -1,0 +1,76 @@
+sequenceDiagram
+    autonumber
+    actor Patient as Patient / Requester
+    participant Web as Web / Mobile UI
+    participant API as Express API (:4000)
+    participant WSS as WebSocket Server
+    participant DB as Neon PostgreSQL
+    actor Bank as Blood Bank Staff
+    actor Admin as System Admin
+    actor Donor as Voluntary Donor
+
+    %% 1. Patient Creates Request
+    Patient->>Web: Submits request (Group, Component, Units, Bank)
+    Web->>API: POST /api/v1/blood-requests
+    API->>DB: INSERT into blood_requests (status: OPEN)
+    API->>WSS: Broadcast blood_request.created
+    WSS-->>Bank: Push new incoming request notification
+    API-->>Web: HTTP 201 Created (requestId)
+
+    %% 2. Blood Bank Reviews & Shortfall
+    Bank->>Web: Opens Incoming Requests tab
+    Web->>API: GET /api/v1/organisation/:orgId/incoming-requests
+    API->>DB: SELECT requests WHERE assignedBankId = :orgId
+    API-->>Web: HTTP 200 (Units: 3, Allocated: 0, Shortfall: 3)
+    Bank->>Web: Clicks "Request Donor Matching (Shortfall: 3)"
+    Web->>API: POST /api/v1/organisation/:orgId/requests/:reqId/request-matching
+    API->>DB: UPDATE blood_requests SET message.matchingRequest (status: REQUESTED)
+    API->>WSS: Broadcast blood_request.matching_requested
+    WSS-->>Admin: Realtime event to System Admin matching queue
+    API-->>Web: HTTP 200 OK
+
+    %% 3. Admin Matching Run & Release
+    Admin->>Web: Opens Admin Matching Operations
+    Web->>API: GET /api/v1/admin/donor-matching/requests
+    API-->>Web: HTTP 200 (Queue with mr_id, status: REQUESTED)
+    Admin->>Web: Clicks "Run Matching Algorithm"
+    Web->>API: POST /api/v1/admin/donor-matching/requests/:reqId/run
+    API->>DB: Query eligible donors (compatible groups, 90d rule, active status)
+    API->>DB: UPDATE blood_requests (status: CANDIDATES_FOUND, rankedCandidates)
+    API->>WSS: Broadcast blood_request.matching_searched
+    WSS-->>Bank: Realtime update: "Candidates Under Admin Review"
+    API-->>Web: HTTP 200 (List of ranked candidates)
+    Admin->>Web: Selects candidates & clicks "Release Candidate Pool"
+    Web->>API: POST /api/v1/admin/donor-matching/requests/:reqId/release
+    API->>DB: UPDATE blood_requests (status: RELEASED, releasedCandidateIds)
+    API->>DB: INSERT into audit_logs (ADMIN_CANDIDATE_RELEASE)
+    API->>WSS: Broadcast blood_request.matching_released
+    WSS-->>Bank: Realtime unlock: "Candidates Released (Ready for Outreach)"
+    API-->>Web: HTTP 200 OK
+
+    %% 4. Outreach & Clinical Lifecycle
+    Bank->>Web: Clicks "Review Released Candidate Pool"
+    Web->>API: GET /api/v1/organisation/:orgId/requests/:reqId/matching-candidates
+    API-->>Web: HTTP 200 (Candidates with masked phone numbers)
+    Bank->>Web: Clicks "Send Outreach"
+    Web->>API: POST /api/v1/organisation/:orgId/requests/:reqId/donor-invitation
+    API->>DB: INSERT/UPDATE donor_responses
+    API-->>Donor: SMS / App Push notification
+    Donor->>Web: Accepts invitation
+    Web->>API: POST /api/v1/requests/:reqId/respond (ACCEPTED)
+    API->>DB: UPDATE donor_responses (ACCEPTED)
+    API->>WSS: Broadcast donor_invitation.response_changed
+    WSS-->>Bank: Realtime notification: Donor Accepted Arrival
+
+    %% 5. Fulfillment & Handover
+    Note over Bank,Donor: Donor arrives -> Intake -> Screening -> Bleed -> TTI Lab Test -> Release
+    Bank->>Web: Prepares Issue Order & Dispatches Units
+    Web->>API: POST /api/v1/organisation/:orgId/hospital-issue-orders
+    API->>DB: UPDATE component_units SET status = 'ISSUED'
+    API->>DB: UPDATE hospital_issue_orders SET status = 'DISPATCHED'
+    API->>WSS: Broadcast hospital_issue.dispatched
+    Patient->>Web: Confirms receipt at hospital bed
+    Web->>API: POST /api/v1/blood-requests/:reqId/patient-acknowledge
+    API->>DB: UPDATE blood_requests SET status = 'CLOSED'
+    API-->>Web: HTTP 200 Request Fulfilled
+

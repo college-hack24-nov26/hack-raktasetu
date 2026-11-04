@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, Suspense } from 'react';
+import { useState, useEffect, useMemo, Suspense } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import {
@@ -24,6 +24,83 @@ const COMPONENTS = [
   { label: 'Fresh Frozen Plasma (FFP)', value: 'Fresh Frozen Plasma' },
 ];
 
+function parseBloodGroupParam(param?: string | null): string {
+  if (!param) return 'B+';
+  const cleaned = param.trim().toUpperCase().replace(/VE$/, '').replace(/\s+/g, '+');
+  if (cleaned === 'A+' || cleaned === 'A_POS') return 'A+';
+  if (cleaned === 'A-' || cleaned === 'A_NEG') return 'A-';
+  if (cleaned === 'B+' || cleaned === 'B_POS') return 'B+';
+  if (cleaned === 'B-' || cleaned === 'B_NEG') return 'B-';
+  if (cleaned === 'AB+' || cleaned === 'AB_POS') return 'AB+';
+  if (cleaned === 'AB-' || cleaned === 'AB_NEG') return 'AB-';
+  if (cleaned === 'O+' || cleaned === 'O_POS') return 'O+';
+  if (cleaned === 'O-' || cleaned === 'O_NEG') return 'O-';
+  return BLOOD_GROUPS.includes(param) ? param : 'B+';
+}
+
+function parseComponentParam(param?: string | null): string {
+  if (!param) return 'Packed Red Blood Cells';
+  const s = param.toLowerCase().replace(/[\-_]/g, ' ');
+  if (s.includes('prbc') || s.includes('packed red')) return 'Packed Red Blood Cells';
+  if (s.includes('whole blood')) return 'Whole Blood';
+  if (s.includes('fresh frozen') || s.includes('ffp') || s.includes('plasma')) return 'Fresh Frozen Plasma';
+  if (s.includes('platelet')) return 'Platelet Concentrate';
+  return 'Packed Red Blood Cells';
+}
+
+/**
+ * Determines availability ranking tier for availability-first sorting:
+ * Rank 1: Verified positive stock (status === 'available', not stale, reportedQuantity > 0)
+ * Rank 2: Unknown / stale / unverified stock
+ * Rank 3: Confirmed zero stock (status === 'zero' or reportedQuantity === 0)
+ */
+function getAvailabilityRank(item: SearchResultItem): number {
+  const isStale = item.availability?.isStale || item.availability?.status === 'stale';
+  const qty = item.availability?.reportedQuantity;
+  const status = item.availability?.status;
+
+  if (!isStale && status === 'available' && qty !== null && qty !== undefined && qty > 0) {
+    return 1;
+  }
+  if (!isStale && (status === 'zero' || qty === 0)) {
+    return 3;
+  }
+  return 2;
+}
+
+/**
+ * Sorts blood availability search results availability-first:
+ * 1. Positive eligible stock (highest units first)
+ * 2. Unknown / stale / unverified stock
+ * 3. Confirmed zero stock
+ * Secondary tiebreaker: Centre name ascending, then hospitalCode
+ */
+function sortAvailabilityResults(items: SearchResultItem[]): SearchResultItem[] {
+  return [...items].sort((a, b) => {
+    const rankA = getAvailabilityRank(a);
+    const rankB = getAvailabilityRank(b);
+
+    if (rankA !== rankB) {
+      return rankA - rankB;
+    }
+
+    if (rankA === 1) {
+      const qtyA = a.availability?.reportedQuantity ?? 0;
+      const qtyB = b.availability?.reportedQuantity ?? 0;
+      if (qtyA !== qtyB) return qtyB - qtyA;
+    }
+
+    const nameA = a.bloodCentre?.hospitalName || '';
+    const nameB = b.bloodCentre?.hospitalName || '';
+    const nameComp = nameA.localeCompare(nameB);
+    if (nameComp !== 0) return nameComp;
+
+    const codeA = a.bloodCentre?.hospitalCode || '';
+    const codeB = b.bloodCentre?.hospitalCode || '';
+    return codeA.localeCompare(codeB);
+  });
+}
+
 function FindBloodContent() {
   const searchParams = useSearchParams();
 
@@ -32,6 +109,7 @@ function FindBloodContent() {
   const queryDistrictCode = searchParams.get('districtCode');
   const queryBloodGroup = searchParams.get('bloodGroup');
   const queryComponent = searchParams.get('component');
+  const querySource = searchParams.get('source');
 
   const initialParsedStateCode = queryStateCode ? parseInt(queryStateCode, 10) : DEFAULT_STATE_CODE;
   const initialParsedDistrictCode = queryDistrictCode ? parseInt(queryDistrictCode, 10) : DEFAULT_DISTRICT_CODE;
@@ -43,12 +121,13 @@ function FindBloodContent() {
     isNaN(initialParsedDistrictCode) ? DEFAULT_DISTRICT_CODE : initialParsedDistrictCode
   );
   const [bloodGroup, setBloodGroup] = useState<string>(
-    queryBloodGroup && BLOOD_GROUPS.includes(queryBloodGroup) ? queryBloodGroup : 'B+'
+    parseBloodGroupParam(queryBloodGroup)
   );
   const [component, setComponent] = useState<string>(
-    queryComponent && COMPONENTS.some((c) => c.value === queryComponent)
-      ? queryComponent
-      : 'Packed Red Blood Cells'
+    parseComponentParam(queryComponent)
+  );
+  const [source, setSource] = useState<'internal' | 'external'>(
+    querySource === 'external' ? 'external' : 'internal'
   );
 
   const [loading, setLoading] = useState(false);
@@ -62,6 +141,11 @@ function FindBloodContent() {
 
   // Mobile tab state: 'list' or 'map'
   const [mobileTab, setMobileTab] = useState<'list' | 'map'>('list');
+
+  // Sorted results ensuring availability-first order
+  const sortedResults = useMemo(() => {
+    return sortAvailabilityResults(results);
+  }, [results]);
 
   const availableDistricts = getDistrictsForState(stateCode);
 
@@ -80,7 +164,8 @@ function FindBloodContent() {
     targetStateCode: number,
     targetDistrictCode: number,
     targetBloodGroup: string,
-    targetComponent: string
+    targetComponent: string,
+    targetSource: 'internal' | 'external'
   ) => {
     setLoading(true);
     setError(null);
@@ -93,6 +178,7 @@ function FindBloodContent() {
         districtCode: String(targetDistrictCode),
         bloodGroup: targetBloodGroup,
         component: targetComponent,
+        source: targetSource,
       });
 
       const res = await fetch(`${apiUrl}/blood-availability?${params.toString()}`);
@@ -124,12 +210,17 @@ function FindBloodContent() {
 
   const handleSearchSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    executeSearch(stateCode, districtCode, bloodGroup, component);
+    executeSearch(stateCode, districtCode, bloodGroup, component, source);
+  };
+
+  const handleSourceChange = (newSource: 'internal' | 'external') => {
+    setSource(newSource);
+    executeSearch(stateCode, districtCode, bloodGroup, component, newSource);
   };
 
   // Run initial search on mount
   useEffect(() => {
-    executeSearch(stateCode, districtCode, bloodGroup, component);
+    executeSearch(stateCode, districtCode, bloodGroup, component, source);
   }, []);
 
   const formatDate = (isoString?: string | null) => {
@@ -306,11 +397,79 @@ function FindBloodContent() {
         </div>
       </form>
 
+      {/* Source Selection Controls */}
+      <div className="mb-6 bg-white p-2.5 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={() => handleSourceChange('internal')}
+            className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-2 ${
+              source === 'internal'
+                ? 'bg-[#B91C32] text-white shadow-xs'
+                : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200'
+            }`}
+          >
+            <span>🩸 RaktaSetu Participating Centres</span>
+            {metaInfo && (
+              <span
+                className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
+                  source === 'internal' ? 'bg-white/20 text-white' : 'bg-rose-100 text-[#B91C32]'
+                }`}
+              >
+                {metaInfo.centresWithStock !== undefined && metaInfo.centresWithStock > 0
+                  ? `${metaInfo.centresWithStock} in stock (${metaInfo.totalCentresSearched ?? metaInfo.totalCentres})`
+                  : `${metaInfo.totalCentresSearched ?? metaInfo.totalCentres ?? metaInfo.participatingCentresCount} centres`}
+              </span>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleSourceChange('external')}
+            className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-2 ${
+              source === 'external'
+                ? 'bg-[#B91C32] text-white shadow-xs'
+                : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200'
+            }`}
+          >
+            <span>🏛️ e-RaktKosh Blood Banks</span>
+            {metaInfo && (
+              <span
+                className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
+                  source === 'external' ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-700'
+                }`}
+              >
+                {metaInfo.centresWithStock !== undefined && metaInfo.centresWithStock > 0
+                  ? `${metaInfo.centresWithStock} reported stock (${metaInfo.totalCentresSearched ?? metaInfo.totalCentres})`
+                  : `${metaInfo.totalCentresSearched ?? metaInfo.totalCentres ?? metaInfo.externalCentresCount} centres`}
+              </span>
+            )}
+          </button>
+        </div>
+
+        <div className="text-[11px] text-slate-500 px-2 text-center md:text-right">
+          {source === 'internal' ? (
+            <span className="text-purple-800 font-semibold flex items-center justify-center md:justify-end gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-purple-600 animate-pulse"></span>
+              Live Authoritative Hospital Stock released by verified clinical staff
+            </span>
+          ) : (
+            <span className="text-slate-600 font-medium">
+              External reported stock figures from Central Ministry e-RaktKosh Portal
+            </span>
+          )}
+        </div>
+      </div>
+
       {/* Meta Notice */}
       {metaInfo && (
         <div className="mb-4 p-4 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
           <div>
-            <strong>Search Scope:</strong> {metaInfo.totalCentres} centres found for {metaInfo.component} ({metaInfo.bloodGroup}).
+            <strong>Search Scope:</strong> {metaInfo.totalCentresSearched ?? metaInfo.totalCentres} centres searched &bull;{' '}
+            <span className="font-bold text-emerald-700">
+              {metaInfo.centresWithStock ?? 0} with available stock
+            </span>{' '}
+            for {metaInfo.component} ({metaInfo.bloodGroup}) under {source === 'internal' ? 'RaktaSetu Participating Centres' : 'e-RaktKosh Directory'}.
           </div>
           <div className="text-[11px] text-slate-500">
             {metaInfo.notes}
@@ -318,17 +477,26 @@ function FindBloodContent() {
         </div>
       )}
 
-      {/* Medical Verification Disclaimer */}
-      {results.length > 0 && (
+      {/* Source-specific Safety & Medical Notice */}
+      {source === 'internal' ? (
+        <div className="mb-6 px-4 py-3 rounded-xl bg-purple-50/80 border border-purple-200 text-xs text-purple-900 flex items-start gap-2.5 shadow-2xs">
+          <svg className="w-4 h-4 text-purple-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+          </svg>
+          <div>
+            <span className="font-bold">Authoritative Internal Inventory:</span> Stock counts for RaktaSetu participating centres are computed from <strong>clinically released, non-expired, unheld units</strong> verified by authorized facility pathologists. Contact centre staff directly to schedule release and transfer.
+          </div>
+        </div>
+      ) : results.length > 0 ? (
         <div className="mb-6 px-4 py-3 rounded-xl bg-blue-50/70 border border-blue-200 text-xs text-blue-900 flex items-start gap-2.5">
           <svg className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
           <div>
-            <span className="font-semibold">Notice on Blood Availability:</span> Quantities displayed represent reported stock data from e-RaktKosh portal integration. <strong>Units are not reserved or guaranteed online.</strong> Always call the blood centre directly to verify physical availability before proceeding.
+            <span className="font-semibold">Externally Reported e-RaktKosh Data:</span> Figures represent periodic reported availability from external facility portals. <strong>Units are not guaranteed or reserved online.</strong> Always call the blood bank directly before travel to verify live physical stock.
           </div>
         </div>
-      )}
+      ) : null}
 
       {/* Error state */}
       {error && (
@@ -350,7 +518,7 @@ function FindBloodContent() {
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 10h16M4 14h16M4 18h16" />
           </svg>
-          <span>List View ({results.length})</span>
+          <span>List View ({sortedResults.length})</span>
         </button>
         <button
           onClick={() => setMobileTab('map')}
@@ -373,16 +541,20 @@ function FindBloodContent() {
         <div className={`lg:col-span-7 xl:col-span-7 space-y-4 ${mobileTab === 'map' ? 'hidden lg:block' : 'block'}`}>
           {loading ? (
             <CardSkeleton count={3} />
-          ) : searched && results.length === 0 ? (
+          ) : searched && sortedResults.length === 0 ? (
             <EmptyState
-              title="No Blood Centres Found"
-              description="No registered blood centres were found for the selected state and district combination. Try selecting a nearby district such as Pune, Amravati, Latur, Mumbai, or Nagpur."
-              actionText="Reset to All Maharashtra"
-              onAction={() => handleStateChange(27)}
+              title={source === 'internal' ? "No Participating Centres with Matching Stock" : "No e-RaktKosh Blood Centres Found"}
+              description={
+                source === 'internal'
+                  ? `No RaktaSetu participating blood centres currently have available ${bloodGroup} ${component} in this district. You can check the "e-RaktKosh Blood Banks" tab to explore external directory stock.`
+                  : "No registered external blood centres were found for the selected state and district combination."
+              }
+              actionText={source === 'internal' ? "Switch to e-RaktKosh Blood Banks" : "Reset to All Maharashtra"}
+              onAction={source === 'internal' ? () => handleSourceChange('external') : () => handleStateChange(27)}
             />
           ) : (
             <div className="space-y-4">
-              {results.map(({ bloodCentre, availability }, index) => {
+              {sortedResults.map(({ bloodCentre, availability }: SearchResultItem, index: number) => {
                 const isStale = availability.isStale || availability.status === 'stale';
                 const isAvailable = availability.status === 'available' && !isStale && (availability.reportedQuantity === null || availability.reportedQuantity > 0);
                 const isZero = (availability.status === 'zero' || availability.reportedQuantity === 0) && !isStale;
@@ -498,25 +670,39 @@ function FindBloodContent() {
 
                           {/* Status Badge */}
                           <div className="mb-2">
-                            {isAvailable && (
-                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">
-                                Stock Reported
-                              </span>
-                            )}
-                            {isZero && (
-                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-rose-100 text-rose-800">
-                                Reported: 0 Units
-                              </span>
-                            )}
-                            {isStale && (
-                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800">
-                                Stale (&gt;24h)
-                              </span>
-                            )}
-                            {isUnknown && (
-                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200">
-                                Stock Unverified Online
-                              </span>
+                            {(bloodCentre as any).isParticipatingCentre ? (
+                              isAvailable ? (
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-purple-100 text-purple-900 border border-purple-200">
+                                  ✓ Verified In Stock
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-rose-100 text-rose-800 border border-rose-200">
+                                  0 Verified Units
+                                </span>
+                              )
+                            ) : (
+                              <>
+                                {isAvailable && (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">
+                                    Stock Reported
+                                  </span>
+                                )}
+                                {isZero && (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-rose-100 text-rose-800">
+                                    Reported: 0 Units
+                                  </span>
+                                )}
+                                {isStale && (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800">
+                                    Stale (&gt;24h)
+                                  </span>
+                                )}
+                                {isUnknown && (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200">
+                                    Stock Unverified Online
+                                  </span>
+                                )}
+                              </>
                             )}
                           </div>
 
@@ -530,14 +716,22 @@ function FindBloodContent() {
                                     {availability.quantityUnit || 'units'}
                                   </span>
                                 </div>
-                                <div className="text-[10px] text-slate-500">Reported stock • Not reserved</div>
+                                <div className="text-[10px] text-purple-700 font-semibold">
+                                  {(bloodCentre as any).isParticipatingCentre
+                                    ? 'Live verified stock • Hospital release'
+                                    : 'Reported stock • Not reserved'}
+                                </div>
                               </div>
                             ) : isZero ? (
                               <div>
                                 <div className="text-lg font-extrabold text-rose-700">
                                   0 <span className="text-xs font-normal text-slate-500">units</span>
                                 </div>
-                                <div className="text-[10px] text-rose-600 font-medium">Out of stock at source</div>
+                                <div className="text-[10px] text-rose-600 font-medium">
+                                  {(bloodCentre as any).isParticipatingCentre
+                                    ? 'Out of stock in facility inventory'
+                                    : 'Out of stock at source'}
+                                </div>
                               </div>
                             ) : isStale ? (
                               <div>
@@ -600,7 +794,7 @@ function FindBloodContent() {
 
             <MapboxBloodMap
               districtCode={districtCode}
-              results={results}
+              results={sortedResults}
               selectedHospitalCode={selectedHospitalCode}
               onSelectCentre={(code) => setSelectedHospitalCode(code)}
               bloodGroup={bloodGroup}

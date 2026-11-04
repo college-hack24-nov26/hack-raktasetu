@@ -15,6 +15,9 @@ interface BloodCentreOption {
   hospitalCode: string;
   hospitalName: string;
   districtCode: number;
+  isParticipatingCentre?: boolean;
+  sourceType?: 'INTERNAL' | 'EXTERNAL';
+  sourceLabel?: string;
 }
 
 const BLOOD_GROUPS = [
@@ -38,6 +41,7 @@ export default function DonorRegistrationPage() {
   const [bloodGroup, setBloodGroup] = useState('B_POS');
   const [stateCode, setStateCode] = useState(DEFAULT_STATE_CODE);
   const [districtCode, setDistrictCode] = useState(DEFAULT_DISTRICT_CODE);
+  const [centreSource, setCentreSource] = useState<'internal' | 'external'>('internal');
   const [centres, setCentres] = useState<BloodCentreOption[]>([]);
   const [primaryCentre, setPrimaryCentre] = useState('');
   const [secondaryCentres, setSecondaryCentres] = useState<string[]>([]);
@@ -72,12 +76,14 @@ export default function DonorRegistrationPage() {
     }
   };
 
-  // Fetch blood centres when state or district changes
+  // Fetch blood centres when state, district, or source changes
   useEffect(() => {
     async function loadCentres() {
       setLoadingCentres(true);
       try {
-        const res = await fetch(`${apiUrl}/blood-centres?stateCode=${stateCode}&districtCode=${districtCode}&limit=50`);
+        const res = await fetch(
+          `${apiUrl}/blood-centres?source=${centreSource}&stateCode=${stateCode}&districtCode=${districtCode}&limit=50`
+        );
         const data = await res.json();
         if (data.success && Array.isArray(data.data) && data.data.length > 0) {
           const seen = new Set<string>();
@@ -90,21 +96,18 @@ export default function DonorRegistrationPage() {
           setCentres(dedupedCentres);
           setPrimaryCentre(dedupedCentres[0]?.hospitalCode || '');
         } else {
-          // Fallback demo option if directory empty
-          const fallback = [{ hospitalCode: `BC-${districtCode}-01`, hospitalName: `District Blood Centre (${districtCode})`, districtCode }];
-          setCentres(fallback);
-          setPrimaryCentre(fallback[0].hospitalCode);
+          setCentres([]);
+          setPrimaryCentre('');
         }
       } catch (e) {
-        const fallback = [{ hospitalCode: `BC-${districtCode}-01`, hospitalName: `District Blood Centre (${districtCode})`, districtCode }];
-        setCentres(fallback);
-        setPrimaryCentre(fallback[0].hospitalCode);
+        setCentres([]);
+        setPrimaryCentre('');
       } finally {
         setLoadingCentres(false);
       }
     }
     loadCentres();
-  }, [stateCode, districtCode, apiUrl]);
+  }, [stateCode, districtCode, centreSource, apiUrl]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -284,25 +287,97 @@ export default function DonorRegistrationPage() {
               </div>
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 mb-1">
-                Primary Preferred Blood Centre *
+            {/* Source Selection Buttons */}
+            <div className="mb-4">
+              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 mb-1.5">
+                Directory Source *
               </label>
-              <select
-                required
-                disabled={loadingCentres}
-                value={primaryCentre}
-                onChange={(e) => setPrimaryCentre(e.target.value)}
-                className="w-full px-3 py-2 text-sm text-slate-900 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#B91C32] bg-white disabled:bg-slate-100"
-              >
-                {centres.map((c, idx) => (
-                  <option key={`${c.hospitalCode}-${idx}`} value={c.hospitalCode}>
-                    {c.hospitalName} ({c.hospitalCode})
-                  </option>
-                ))}
-              </select>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCentreSource('internal')}
+                  className={`flex items-center justify-between p-3 rounded-xl border text-left transition-all ${
+                    centreSource === 'internal'
+                      ? 'border-[#B91C32] bg-rose-50/50 ring-1 ring-[#B91C32]'
+                      : 'border-slate-200 bg-white hover:border-slate-300 text-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-base">🩸</span>
+                    <div>
+                      <div className="text-xs font-bold text-slate-900">RaktaSetu Participating</div>
+                      <div className="text-[10px] text-slate-500">Live system centres</div>
+                    </div>
+                  </div>
+                  {centreSource === 'internal' && (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#B91C32] text-white">Active</span>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setCentreSource('external')}
+                  className={`flex items-center justify-between p-3 rounded-xl border text-left transition-all ${
+                    centreSource === 'external'
+                      ? 'border-[#B91C32] bg-rose-50/50 ring-1 ring-[#B91C32]'
+                      : 'border-slate-200 bg-white hover:border-slate-300 text-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-base">🏛️</span>
+                    <div>
+                      <div className="text-xs font-bold text-slate-900">e-RaktKosh Banks</div>
+                      <div className="text-[10px] text-slate-500">National directory</div>
+                    </div>
+                  </div>
+                  {centreSource === 'external' && (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#B91C32] text-white">Active</span>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700">
+                  Primary Preferred Blood Centre *
+                </label>
+                <span className="text-[11px] text-slate-500">
+                  {loadingCentres ? 'Loading...' : `${centres.length} centre${centres.length === 1 ? '' : 's'} available`}
+                </span>
+              </div>
+
+              {centres.length > 0 ? (
+                <select
+                  required
+                  disabled={loadingCentres}
+                  value={primaryCentre}
+                  onChange={(e) => setPrimaryCentre(e.target.value)}
+                  className="w-full px-3 py-2 text-sm text-slate-900 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#B91C32] bg-white disabled:bg-slate-100"
+                >
+                  {centres.map((c, idx) => (
+                    <option key={`${c.hospitalCode}-${idx}`} value={c.hospitalCode}>
+                      {c.isParticipatingCentre ? '✓ [RaktaSetu Verified] ' : '[e-RaktKosh] '}
+                      {c.hospitalName} ({c.hospitalCode})
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <div className="p-3 bg-amber-50 rounded-lg border border-amber-200 text-xs text-amber-800 space-y-2">
+                  <p>
+                    No {centreSource === 'internal' ? 'participating RaktaSetu centres' : 'e-RaktKosh blood banks'} found for the selected district.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setCentreSource(centreSource === 'internal' ? 'external' : 'internal')}
+                    className="inline-flex items-center gap-1 font-semibold text-[#B91C32] underline hover:no-underline"
+                  >
+                    Switch to {centreSource === 'internal' ? 'e-RaktKosh Blood Banks' : 'RaktaSetu Participating Centres'}
+                  </button>
+                </div>
+              )}
               <span className="text-[11px] text-slate-500 mt-1 block">
-                Your preferred donation facility. Does not track your live GPS position.
+                Your preferred donation facility. Does not assign membership or change your donor role.
               </span>
             </div>
           </div>

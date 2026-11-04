@@ -518,8 +518,8 @@ export class TraceabilityService {
     }
 
     const membership = await this.verifyOrgMembership(sourceUnit.organisationId, caller);
-    if (!['ORG_ADMIN', 'INVENTORY_STAFF', 'CLINICAL_STAFF'].includes(membership.role)) {
-      throw new Error('Permission denied: Only ORG_ADMIN, INVENTORY_STAFF, or CLINICAL_STAFF can register component derivation.');
+    if (!['ORG_ADMIN', 'INVENTORY_STAFF', 'CLINICAL_STAFF', 'COLLECTION_STAFF'].includes(membership.role)) {
+      throw new Error('Permission denied: Only ORG_ADMIN, INVENTORY_STAFF, CLINICAL_STAFF, or COLLECTION_STAFF can register component derivation.');
     }
 
     if (sourceUnit.status === 'REJECTED') {
@@ -598,6 +598,43 @@ export class TraceabilityService {
           actorUserId: caller.id,
           organisationId: sourceUnit.organisationId,
           reason: `Derived ${createdComponents.length} component(s): ${createdComponents.map((c) => c.componentType).join(', ')}`,
+        },
+      });
+
+      // Realtime events: notify inventory summary and component listeners across WebSocket channels
+      await RealtimeService.publishOutboxEvent(tx, {
+        eventType: 'inventory.summary_changed',
+        organisationId: sourceUnit.organisationId,
+        entityType: 'Organisation',
+        entityId: sourceUnit.organisationId,
+        payload: {
+          organisationId: sourceUnit.organisationId,
+          reason: 'COMPONENTS_DERIVED',
+          sourceUnitId: sourceUnit.id,
+          sourceUnitNumber: sourceUnit.unitNumber,
+          derivedComponentCount: createdComponents.length,
+        },
+      });
+
+      await RealtimeService.publishOutboxEvent(tx, {
+        eventType: 'component.status_changed',
+        organisationId: sourceUnit.organisationId,
+        entityType: 'CollectionUnit',
+        entityId: sourceUnit.id,
+        payload: {
+          organisationId: sourceUnit.organisationId,
+          sourceUnitId: sourceUnit.id,
+          sourceUnitNumber: sourceUnit.unitNumber,
+          fromStatus: sourceUnit.status,
+          toStatus: 'PROCESSING_COMPLETED',
+          derivedCount: createdComponents.length,
+          components: createdComponents.map((c) => ({
+            id: c.id,
+            componentCode: c.componentCode,
+            componentType: c.componentType,
+            bloodGroup: c.bloodGroup,
+            status: c.status,
+          })),
         },
       });
 

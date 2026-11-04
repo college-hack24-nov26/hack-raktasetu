@@ -1,0 +1,42 @@
+graph TD
+    classDef actorStyle fill:#2563eb,stroke:#1d4ed8,stroke-width:2px,color:#ffffff;
+    classDef systemStyle fill:#dc2626,stroke:#b91c1c,stroke-width:2px,color:#ffffff;
+    classDef externalStyle fill:#4b5563,stroke:#374151,stroke-width:2px,color:#ffffff;
+
+    subgraph Actors ["Human Actors"]
+        Patient["Patient / Requester"]:::actorStyle
+        Donor["Voluntary Donor"]:::actorStyle
+        OrgAdmin["Blood Bank Admin (ORG_ADMIN)"]:::actorStyle
+        ClinicalStaff["Clinical Staff (Medical Officer)"]:::actorStyle
+        InventoryStaff["Inventory & Lab Tech"]:::actorStyle
+        CollectionStaff["Phlebotomist / Collection Staff"]:::actorStyle
+        CampCoordinator["Camp Organizer / Coordinator"]:::actorStyle
+        SysAdmin["Platform / System Admin"]:::actorStyle
+    end
+
+    subgraph CorePlatform ["RaktaSetu Core Platform"]
+        RaktaSetuSystem["RaktaSetu Platform\n- Next.js Web App (:3000)\n- Express API (:4000)\n- WebSocket Realtime (:4000/ws)\n- Expo React Native Mobile App"]:::systemStyle
+    end
+
+    subgraph ExternalSystems ["External & Partner Systems"]
+        ERaktKosh["e-RaktKosh National Portal\n(MoHFW Govt of India)"]:::externalStyle
+        WhatsAppMeta["WhatsApp Cloud API\n(Meta Business Platform)"]:::externalStyle
+        MapboxAPI["Mapbox GL / Geocoding API"]:::externalStyle
+        PostgresDB["Neon PostgreSQL Database\n(Multi-AZ Cloud SQL)"]:::externalStyle
+    end
+
+    %% Interactions
+    Patient -->|"Search blood, submit emergency request, confirm receipt"| RaktaSetuSystem
+    Donor -->|"Register, share location, accept invitations, view history"| RaktaSetuSystem
+    OrgAdmin -->|"Manage staff, verify camps, request donor matching"| RaktaSetuSystem
+    ClinicalStaff -->|"Screen donors, verify lab tests, authorise release"| RaktaSetuSystem
+    InventoryStaff -->|"Process components, manage storage, dispatch orders"| RaktaSetuSystem
+    CollectionStaff -->|"Verify readiness, check-in donors, record bleeds"| RaktaSetuSystem
+    CampCoordinator -->|"Submit camp proposals, view camp live progress"| RaktaSetuSystem
+    SysAdmin -->|"Approve centres, run matching algorithm, release candidates"| RaktaSetuSystem
+
+    RaktaSetuSystem -->|"Scrape/Sync live blood stock & centres"| ERaktKosh
+    RaktaSetuSystem -->|"Send OTPs & donor outreach notifications"| WhatsAppMeta
+    RaktaSetuSystem -->|"Render interactive maps & pinpoints"| MapboxAPI
+    RaktaSetuSystem -->|"Prisma ORM transactions & audit logs"| PostgresDB
+

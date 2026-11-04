@@ -9,8 +9,10 @@ export interface UseRealtimeOptions {
   organisationId?: string;
   userId?: string;
   campId?: string;
+  channel?: string;
   token?: string; // Optional if session cookie is present
   onEvent?: (event: RealtimeEventEnvelope) => void;
+  onReconnect?: () => void;
   enabled?: boolean;
 }
 
@@ -18,8 +20,10 @@ export function useRealtime({
   organisationId,
   userId,
   campId,
+  channel,
   token,
   onEvent,
+  onReconnect,
   enabled = true,
 }: UseRealtimeOptions) {
   const [status, setStatus] = useState<RealtimeStatus>('disconnected');
@@ -34,6 +38,8 @@ export function useRealtime({
   const seenEventIdsRef = useRef<Set<string>>(new Set());
   const lastEventTimestampRef = useRef<string>('');
   const onEventRef = useRef(onEvent);
+  const onReconnectRef = useRef(onReconnect);
+  onReconnectRef.current = onReconnect;
 
   useEffect(() => {
     if (!lastEventTimestampRef.current) {
@@ -77,8 +83,27 @@ export function useRealtime({
     }
   }, [registerEventId]);
 
+  const currentCampIdRef = useRef<string | undefined>(campId);
+  currentCampIdRef.current = campId;
+  const currentChannelRef = useRef<string | undefined>(channel);
+  currentChannelRef.current = channel;
+
+  // Dynamic camp channel subscription without tearing down the existing WebSocket
   useEffect(() => {
-    if (!enabled || (!organisationId && !userId && !campId)) {
+    if (campId && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'subscribe', channel: `camp:${campId}` }));
+    }
+  }, [campId]);
+
+  // Dynamic custom channel subscription without tearing down the existing WebSocket
+  useEffect(() => {
+    if (channel && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'subscribe', channel }));
+    }
+  }, [channel]);
+
+  useEffect(() => {
+    if (!enabled || (!organisationId && !userId && !currentCampIdRef.current && !currentChannelRef.current)) {
       setStatus('disconnected');
       return;
     }
@@ -91,14 +116,23 @@ export function useRealtime({
         heartbeatTimerRef.current = null;
       }
       if (wsRef.current) {
-        wsRef.current.onopen = null;
-        wsRef.current.onclose = null;
-        wsRef.current.onerror = null;
-        wsRef.current.onmessage = null;
-        if (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING) {
-          wsRef.current.close(1000, 'Component unmounted or subscription change');
-        }
+        const sock = wsRef.current;
         wsRef.current = null;
+        sock.onclose = null;
+        sock.onerror = null;
+        sock.onmessage = null;
+
+        if (sock.readyState === WebSocket.CONNECTING) {
+          sock.onopen = () => {
+            try {
+              sock.close(1000, 'Component unmounted during handshake');
+            } catch {}
+          };
+        } else if (sock.readyState === WebSocket.OPEN) {
+          try {
+            sock.close(1000, 'Component unmounted or subscription change');
+          } catch {}
+        }
       }
     }
 
@@ -114,6 +148,9 @@ export function useRealtime({
 
     function connect() {
       if (!isMounted) return;
+      if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
       cleanupSocket();
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -155,13 +192,19 @@ export function useRealtime({
           if (userId) {
             socket.send(JSON.stringify({ type: 'subscribe', channel: `user:${userId}` }));
           }
-          if (campId) {
-            socket.send(JSON.stringify({ type: 'subscribe', channel: `camp:${campId}` }));
+          if (currentCampIdRef.current) {
+            socket.send(JSON.stringify({ type: 'subscribe', channel: `camp:${currentCampIdRef.current}` }));
+          }
+          if (currentChannelRef.current) {
+            socket.send(JSON.stringify({ type: 'subscribe', channel: currentChannelRef.current }));
           }
 
-          // If reconnecting, perform catch-up sync for any events that occurred while disconnected
-          if (wasReconnecting && organisationId) {
-            syncMissedEvents(organisationId, lastEventTimestampRef.current);
+          // If reconnecting, notify listener and perform catch-up sync
+          if (wasReconnecting) {
+            onReconnectRef.current?.();
+            if (organisationId) {
+              syncMissedEvents(organisationId, lastEventTimestampRef.current);
+            }
           }
 
           // Setup ping heartbeat every 25 seconds
@@ -244,7 +287,7 @@ export function useRealtime({
       if (fallbackPollTimerRef.current) clearInterval(fallbackPollTimerRef.current);
       cleanupSocket();
     };
-  }, [organisationId, userId, campId, token, enabled, syncMissedEvents, registerEventId]);
+  }, [organisationId, userId, token, enabled, syncMissedEvents, registerEventId]);
 
   return {
     status,

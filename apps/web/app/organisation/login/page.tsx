@@ -24,6 +24,7 @@ export default function OrganisationLoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [memberships, setMemberships] = useState<OrgMembership[]>([]);
+  const [userApplication, setUserApplication] = useState<any>(null);
 
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000/api/v1';
 
@@ -98,6 +99,21 @@ export default function OrganisationLoginPage() {
       }
 
       if (activeMemberships.length === 0) {
+        let userApp: any = null;
+        try {
+          const appRes = await fetch(`${apiUrl}/organisations/me/applications`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (appRes.ok) {
+            const appData = await appRes.json();
+            if (appData.data && appData.data.length > 0) {
+              userApp = appData.data[0];
+            }
+          }
+        } catch {
+          // ignore error fetching applications
+        }
+        setUserApplication(userApp);
         setMemberships([]);
         setStep('no_membership');
         return;
@@ -157,36 +173,133 @@ export default function OrganisationLoginPage() {
           )}
 
           {step === 'no_membership' ? (
-            <div className="p-5 rounded-2xl bg-amber-50/90 border border-amber-200 text-center space-y-3">
-              <div className="w-10 h-10 rounded-full bg-amber-100 text-amber-800 mx-auto flex items-center justify-center font-bold text-base">
-                !
+            userApplication && (userApplication.status === 'SUBMITTED' || userApplication.status === 'UNDER_REVIEW') ? (
+              <div className="p-5 rounded-2xl bg-amber-50/90 border border-amber-200 text-center space-y-3">
+                <div className="w-10 h-10 rounded-full bg-amber-100 text-amber-800 mx-auto flex items-center justify-center font-bold text-base">
+                  ⏳
+                </div>
+                <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-200 text-amber-900 uppercase tracking-wider">
+                  Application Under Review
+                </span>
+                <h2 className="text-sm font-bold text-amber-900">{userApplication.hospitalName}</h2>
+                <p className="text-xs text-amber-800 leading-relaxed">
+                  Your institutional onboarding application (License: <strong className="font-mono">{userApplication.licenseNumber}</strong>)
+                  was received and is currently under review by the Platform Administrator for CDSCO compliance.
+                </p>
+                <div className="p-3 bg-white rounded-xl border border-amber-200 text-[11px] text-slate-600 text-left space-y-1">
+                  <strong>Status &amp; Next Steps:</strong>
+                  <p>• District: {userApplication.districtName || userApplication.districtCode} (State: {userApplication.stateCode})</p>
+                  <p>• Contact Registered: {userApplication.contactPerson} ({formatPhoneNumber(officerPhone)})</p>
+                  <p>• Once approved by the National Blood Transfusion Council, your mobile will automatically be activated as <strong>Blood Bank Administrator (ORG_ADMIN)</strong>.</p>
+                </div>
+                <div className="pt-2 flex flex-col gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { setStep('creds'); setOtp(''); }}
+                    className="w-full py-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 text-xs font-semibold"
+                  >
+                    Return to Login
+                  </button>
+                </div>
               </div>
-              <h2 className="text-sm font-bold text-amber-900">No Active Blood Bank Memberships Found</h2>
-              <p className="text-xs text-amber-800 leading-relaxed">
-                Your mobile (<strong>{formatPhoneNumber(officerPhone)}</strong>) authenticated successfully, but is not currently linked
-                to an active, verified institutional blood bank.
-              </p>
-              <div className="p-3 bg-white rounded-xl border border-amber-200 text-[11px] text-slate-600 text-left space-y-1">
-                <strong>Next steps:</strong>
-                <p>• If you recently applied to onboard a blood bank, your application may still be in <em>PENDING REVIEW</em>.</p>
-                <p>• If your facility is already verified, ask your Blood Bank Administrator (ORG_ADMIN) to send a staff invite to your mobile.</p>
+            ) : userApplication && userApplication.status === 'RETURNED_FOR_CORRECTION' ? (
+              <div className="p-5 rounded-2xl bg-blue-50/90 border border-blue-200 text-center space-y-3">
+                <div className="w-10 h-10 rounded-full bg-blue-100 text-blue-800 mx-auto flex items-center justify-center font-bold text-base">
+                  ✍️
+                </div>
+                <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-200 text-blue-900 uppercase tracking-wider">
+                  Action Required: Returned for Correction
+                </span>
+                <h2 className="text-sm font-bold text-blue-900">{userApplication.hospitalName}</h2>
+                <p className="text-xs text-blue-800 leading-relaxed">
+                  The Platform Administrator reviewed your application and requested revisions before approval:
+                </p>
+                {userApplication.reviewNotes && (
+                  <div className="p-3 bg-white rounded-xl border border-blue-200 text-xs text-slate-700 text-left italic">
+                    "{userApplication.reviewNotes}"
+                  </div>
+                )}
+                <div className="pt-2 flex flex-col gap-2">
+                  <Link
+                    href="/organisation/register-bank"
+                    className="w-full py-2.5 rounded-xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 transition-colors text-center"
+                  >
+                    Update &amp; Re-submit Application
+                  </Link>
+                  <button
+                    type="button"
+                    onClick={() => { setStep('creds'); setOtp(''); }}
+                    className="w-full py-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 text-xs font-semibold"
+                  >
+                    Return to Login
+                  </button>
+                </div>
               </div>
-              <div className="pt-2 flex flex-col gap-2">
-                <Link
-                  href="/organisation/portal"
-                  className="w-full py-2.5 rounded-xl bg-slate-900 text-white text-xs font-bold hover:bg-slate-800 transition-colors text-center"
-                >
-                  Track Application Status in Portal
-                </Link>
-                <button
-                  type="button"
-                  onClick={() => { setStep('creds'); setOtp(''); }}
-                  className="w-full py-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 text-xs font-semibold"
-                >
-                  Try Different Account Number
-                </button>
+            ) : userApplication && userApplication.status === 'REJECTED' ? (
+              <div className="p-5 rounded-2xl bg-red-50/90 border border-red-200 text-center space-y-3">
+                <div className="w-10 h-10 rounded-full bg-red-100 text-red-800 mx-auto flex items-center justify-center font-bold text-base">
+                  ✕
+                </div>
+                <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-red-200 text-red-900 uppercase tracking-wider">
+                  Application Rejected
+                </span>
+                <h2 className="text-sm font-bold text-red-900">{userApplication.hospitalName}</h2>
+                <p className="text-xs text-red-800 leading-relaxed">
+                  Your onboarding application could not be verified under National Blood Centre standards.
+                </p>
+                {userApplication.reviewNotes && (
+                  <div className="p-3 bg-white rounded-xl border border-red-200 text-xs text-slate-700 text-left italic">
+                    "{userApplication.reviewNotes}"
+                  </div>
+                )}
+                <div className="pt-2 flex flex-col gap-2">
+                  <Link
+                    href="/organisation/register-bank"
+                    className="w-full py-2.5 rounded-xl bg-slate-900 text-white text-xs font-bold hover:bg-slate-800 transition-colors text-center"
+                  >
+                    Submit New Application
+                  </Link>
+                  <button
+                    type="button"
+                    onClick={() => { setStep('creds'); setOtp(''); }}
+                    className="w-full py-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 text-xs font-semibold"
+                  >
+                    Return to Login
+                  </button>
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="p-5 rounded-2xl bg-amber-50/90 border border-amber-200 text-center space-y-3">
+                <div className="w-10 h-10 rounded-full bg-amber-100 text-amber-800 mx-auto flex items-center justify-center font-bold text-base">
+                  !
+                </div>
+                <h2 className="text-sm font-bold text-amber-900">No Active Blood Bank Memberships Found</h2>
+                <p className="text-xs text-amber-800 leading-relaxed">
+                  Your mobile (<strong>{formatPhoneNumber(officerPhone)}</strong>) authenticated successfully, but is not currently linked
+                  to an active, verified institutional blood bank.
+                </p>
+                <div className="p-3 bg-white rounded-xl border border-amber-200 text-[11px] text-slate-600 text-left space-y-1">
+                  <strong>Next steps:</strong>
+                  <p>• If you represent an accredited hospital or blood bank, apply to register below.</p>
+                  <p>• If your facility is already verified, ask your Blood Bank Administrator (ORG_ADMIN) to send a staff invite to your mobile number.</p>
+                </div>
+                <div className="pt-2 flex flex-col gap-2">
+                  <Link
+                    href="/organisation/register-bank"
+                    className="w-full py-2.5 rounded-xl bg-[#B91C32] text-white text-xs font-bold hover:bg-[#991B2B] transition-colors text-center"
+                  >
+                    Register Blood Bank Facility
+                  </Link>
+                  <button
+                    type="button"
+                    onClick={() => { setStep('creds'); setOtp(''); }}
+                    className="w-full py-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 text-xs font-semibold"
+                  >
+                    Try Different Account Number
+                  </button>
+                </div>
+              </div>
+            )
           ) : step === 'creds' ? (
             <form onSubmit={handleSendOtp} className="space-y-4 text-xs sm:text-sm">
               <div>

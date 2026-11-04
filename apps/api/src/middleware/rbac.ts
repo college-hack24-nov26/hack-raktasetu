@@ -1,5 +1,5 @@
 import { Response, NextFunction } from 'express';
-import { AuthenticatedRequest } from './auth';
+import { AuthenticatedRequest, requireAuth } from './auth';
 import { prisma } from '../lib/prisma';
 import { OrgRole } from '@prisma/client';
 
@@ -190,13 +190,22 @@ export function requireOrgPermission(
   return async (req: OrgScopedRequest, res: Response, next: NextFunction) => {
     try {
       if (!req.user) {
-        return res.status(401).json({
-          success: false,
-          error: {
-            message: 'Authentication required. Please sign in.',
-            code: 'UNAUTHORIZED',
-          },
+        await new Promise<void>((resolve, reject) => {
+          requireAuth(req as any, res, (err?: any) => {
+            if (err) reject(err);
+            else resolve();
+          });
         });
+        if (res.headersSent) return;
+        if (!req.user) {
+          return res.status(401).json({
+            success: false,
+            error: {
+              message: 'Authentication required. Please sign in.',
+              code: 'UNAUTHORIZED',
+            },
+          });
+        }
       }
 
       // Extract target organisation ID from path, body, or query

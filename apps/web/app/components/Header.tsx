@@ -354,6 +354,13 @@ export function Header() {
                 >
                   About Donating
                 </Link>
+                <Link
+                  href="/donor/portal"
+                  onClick={closeAll}
+                  className="flex items-center px-3.5 py-2.5 rounded-xl hover:bg-slate-50 font-semibold text-slate-900 hover:text-[#B91C32] transition-colors"
+                >
+                  Donor Portal &amp; History
+                </Link>
               </div>
             )}
           </div>
@@ -431,6 +438,16 @@ export function Header() {
                       <span>Camp Operations Dashboard</span>
                       <span className="text-[10px] font-bold uppercase tracking-wider bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full">
                         Camp
+                      </span>
+                    </Link>
+                    <Link
+                      href="/camp/donor-registration"
+                      onClick={closeAll}
+                      className="flex items-center justify-between px-3.5 py-2.5 rounded-xl hover:bg-slate-50 font-semibold text-slate-900 hover:text-[#B91C32] transition-colors"
+                    >
+                      <span>Register Donor (Staff)</span>
+                      <span className="text-[10px] font-bold uppercase tracking-wider bg-rose-50 text-rose-700 px-2 py-0.5 rounded-full">
+                        Wizard
                       </span>
                     </Link>
                     <Link

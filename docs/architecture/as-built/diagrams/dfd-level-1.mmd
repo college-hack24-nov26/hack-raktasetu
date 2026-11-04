@@ -1,0 +1,56 @@
+flowchart TD
+    classDef procStyle fill:#1e40af,stroke:#1e3a8a,color:#ffffff;
+    classDef storeStyle fill:#475569,stroke:#334155,color:#ffffff;
+    classDef entStyle fill:#047857,stroke:#065f46,color:#ffffff;
+
+    Patient[Patient]:::entStyle
+    Donor[Donor]:::entStyle
+    Staff[Blood Bank Staff]:::entStyle
+    Admin[System Admin]:::entStyle
+
+    D1[("D1: Users & Auth")]:::storeStyle
+    D2[("D2: Blood Requests & Routing")]:::storeStyle
+    D3[("D3: Donors & Location Sessions")]:::storeStyle
+    D4[("D4: Inventory & Components")]:::storeStyle
+    D5[("D5: Handover & Issue Orders")]:::storeStyle
+    D6[("D6: Audit & Outbox Logs")]:::storeStyle
+
+    P1(("1.0\nAuth & Session\nManagement")):::procStyle
+    P2(("2.0\nBlood Request &\nRouting Engine")):::procStyle
+    P3(("3.0\nInventory Allocation\n& Shortfall Calc")):::procStyle
+    P4(("4.0\nAdmin Donor Matching\n& Candidate Release")):::procStyle
+    P5(("5.0\nClinical Intake,\nBleed & Testing")):::procStyle
+    P6(("6.0\nHandover, Dispatch\n& Receipt Confirmation")):::procStyle
+
+    %% Data Flows
+    Patient -->|"Login / OTP"| P1
+    Donor -->|"Login / OTP"| P1
+    Staff -->|"Login / OTP"| P1
+    Admin -->|"Login / OTP"| P1
+    P1 <--> D1
+
+    Patient -->|"Create Request"| P2
+    P2 --> D2
+    P2 -->|"Request Details"| P3
+
+    P3 <--> D4
+    P3 -->|"Calculate Shortfall"| Staff
+    Staff -->|"Trigger Matching"| P3
+    P3 -->|"Create Matching Request"| D2
+
+    Admin -->|"Trigger Run & Release"| P4
+    P4 <--> D2
+    P4 <--> D3
+    P4 --> D6
+    P4 -->|"Released Candidates"| Staff
+
+    Staff -->|"Outreach to Donors"| Donor
+    Donor -->|"Accept / Arrive"| P5
+    Staff -->|"Screen, Bleed, Test"| P5
+    P5 <--> D4
+
+    Staff -->|"Prepare Issue Order"| P6
+    P6 <--> D5
+    P6 <--> D4
+    P6 -->|"Confirm Receipt"| Patient
+

@@ -1,0 +1,49 @@
+flowchart TD
+    classDef clientBox fill:#1e40af,stroke:#1e3a8a,color:#ffffff;
+    classDef serverBox fill:#047857,stroke:#065f46,color:#ffffff;
+    classDef eventBox fill:#b45309,stroke:#92400e,color:#ffffff;
+
+    subgraph Clients ["WebSocket Clients"]
+        WebPortal["Web Browser (useRealtime)\nChannels: org:*, user:*, admin:requests"]:::clientBox
+        MobileApp["Mobile App (realtimeClient)\nChannels: user:*, location:*"]:::clientBox
+    end
+
+    subgraph WSServer ["WebSocket Server (Port 4000/ws)"]
+        WSHandler["RealtimeService.init(server)\n- Token Auth Handshake\n- Channel Subscriptions\n- Heartbeat Ping / Pong"]:::serverBox
+        OutboxTable[("outbox_events Table\nTransactional Outbox Pattern")]:::serverBox
+    end
+
+    subgraph Events ["Dispatched Realtime Events"]
+        E1["blood_request.created"]:::eventBox
+        E2["blood_request.matching_requested"]:::eventBox
+        E3["blood_request.matching_searched"]:::eventBox
+        E4["blood_request.matching_released"]:::eventBox
+        E5["donor_invitation.response_changed"]:::eventBox
+        E6["hospital_issue.dispatched"]:::eventBox
+        E7["donor_location.updated"]:::eventBox
+        E8["inventory.summary_changed"]:::eventBox
+    end
+
+    WebPortal <-->|"ws://localhost:4000/ws"| WSHandler
+    MobileApp <-->|"ws://localhost:4000/ws"| WSHandler
+
+    WSHandler <--> OutboxTable
+
+    WSHandler --> E1
+    WSHandler --> E2
+    WSHandler --> E3
+    WSHandler --> E4
+    WSHandler --> E5
+    WSHandler --> E6
+    WSHandler --> E7
+    WSHandler --> E8
+
+    E1 -->|"Target: Designated Blood Bank"| WebPortal
+    E2 -->|"Target: System Admin"| WebPortal
+    E3 -->|"Target: Blood Bank (Review badge)"| WebPortal
+    E4 -->|"Target: Requesting Blood Bank"| WebPortal
+    E5 -->|"Target: Blood Bank Staff"| WebPortal
+    E6 -->|"Target: Patient & Hospital"| WebPortal
+    E7 -->|"Target: Blood Bank Map View"| WebPortal
+    E8 -->|"Target: Inventory Dashboard"| WebPortal
+

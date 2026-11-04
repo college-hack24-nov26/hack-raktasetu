@@ -38,13 +38,19 @@ export interface ExternalBloodCentreResult {
 // Verified ID mappings based on tested live e-RaktKosh portal requests
 export const VERIFIED_COMPONENT_IDS: Record<string, number> = {
   'Packed Red Blood Cells': 12,
+  'Packed Red Blood Cells (PRBC)': 12,
   'PRBC': 12,
   'Whole Blood': 11,
+  'WHOLE_BLOOD': 11,
   'Fresh Frozen Plasma': 13,
+  'Fresh Frozen Plasma (FFP)': 13,
+  'FRESH_FROZEN_PLASMA': 13,
   'FFP': 13,
   'Platelet Concentrate': 14,
+  'PLATELET_CONCENTRATE': 14,
   'Platelets': 14,
   'Cryoprecipitate': 15,
+  'CRYOPRECIPITATE': 15,
 };
 
 // Verified Blood Group IDs based on tested live e-RaktKosh portal requests

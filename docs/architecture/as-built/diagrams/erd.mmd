@@ -1,0 +1,113 @@
+erDiagram
+    User ||--o| DonorProfile : "has profile"
+    User ||--o{ BloodRequest : "creates"
+    User ||--o{ OrganisationMembership : "belongs to"
+    User ||--o{ AuditLog : "records"
+    User ||--o{ Session : "authenticates"
+    User ||--o{ DonorLocationSession : "opens location sessions"
+    User ||--o| DonorLatestLocation : "broadcasts location"
+
+    BloodCentre ||--o{ BloodRequest : "designated in"
+    BloodCentre ||--o{ BloodAvailabilitySnapshot : "has snapshots"
+    BloodCentre ||--o{ DonorProfile : "primary centre for"
+    BloodCentre ||--o{ Organisation : "verified as"
+    BloodCentre ||--o{ Camp : "associated with"
+
+    Organisation ||--o{ OrganisationMembership : "employs"
+    Organisation ||--o{ Camp : "organises"
+    Organisation ||--o{ CollectionUnit : "holds collection"
+    Organisation ||--o{ ComponentUnit : "holds inventory"
+    Organisation ||--o{ StorageLocation : "manages"
+    Organisation ||--o{ HospitalIssueOrder : "issues"
+
+    BloodRequest ||--o{ DonorResponse : "has responses"
+    BloodRequest ||--o{ ComponentUnit : "allocates"
+    BloodRequest ||--o{ HospitalIssueOrder : "fulfilled by"
+
+    Camp ||--o{ CampStaffAssignment : "staffs"
+    Camp ||--o{ CampAttendance : "registers attendance"
+    Camp ||--o{ CollectionUnit : "collects"
+    Camp ||--o{ HandoverManifest : "dispatches"
+
+    CampAttendance ||--o| ClinicalScreening : "screened in"
+    CampAttendance ||--o| DonationEvent : "donates in"
+
+    DonationEvent ||--o{ CollectionUnit : "produces"
+    CollectionUnit ||--o{ ComponentUnit : "derived into"
+    CollectionUnit ||--o{ LaboratoryTestRecord : "tested by"
+    CollectionUnit ||--o{ HandoverItem : "shipped via"
+
+    ComponentUnit ||--o{ LaboratoryTestRecord : "tested by"
+    ComponentUnit ||--o{ ClinicalReleaseRecord : "released by"
+    ComponentUnit ||--o{ StorageMovementRecord : "moved in"
+    ComponentUnit ||--o{ HospitalIssueItem : "issued in"
+    ComponentUnit ||--o| ComponentDispositionRecord : "disposed by"
+
+    HandoverManifest ||--o{ HandoverItem : "contains"
+    HandoverManifest ||--o{ ReconciliationException : "records discrepancies"
+
+    HospitalIssueOrder ||--o{ HospitalIssueItem : "contains"
+    HospitalIssueOrder ||--o{ HospitalDiscrepancy : "has exceptions"
+
+    User {
+        string id PK
+        string phoneNumber UK
+        string name
+        enum role
+        enum status
+        datetime createdAt
+    }
+
+    BloodRequest {
+        string id PK
+        string requesterUserId FK
+        string bloodGroup
+        string component
+        int units
+        string urgency
+        string hospitalCode FK
+        string hospitalName
+        string status
+        string message "JSONB: routing & matching state"
+        int allocatedUnits
+    }
+
+    Organisation {
+        string id PK
+        string orgCode UK
+        string name
+        enum orgType
+        enum status
+        int stateCode
+        int districtCode
+    }
+
+    DonorProfile {
+        string id PK
+        string userId FK
+        string bloodGroup
+        boolean isAvailable
+        boolean consentToContact
+        int completedDonationsCount
+        datetime lastDonationDate
+    }
+
+    CollectionUnit {
+        string id PK
+        string unitNumber UK
+        string donationEventId FK
+        string bloodGroup
+        int volumeMl
+        enum status
+    }
+
+    ComponentUnit {
+        string id PK
+        string componentCode UK
+        string collectionUnitId FK
+        enum componentType
+        string bloodGroup
+        enum status
+        datetime expiresAt
+    }
+

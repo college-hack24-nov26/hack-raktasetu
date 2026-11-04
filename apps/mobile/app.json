@@ -1,0 +1,57 @@
+{
+  "expo": {
+    "name": "RaktaSetu Donor",
+    "slug": "raktasetu-donor",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": false,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#DC2626"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.raktasetu.donor",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "RaktaSetu needs your location to display nearby blood donation requests.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "RaktaSetu needs background location access to alert you when emergency blood requests occur near you during an active sharing session.",
+        "UIBackgroundModes": ["location"]
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#DC2626"
+      },
+      "package": "com.raktasetu.donor",
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION",
+        "POST_NOTIFICATIONS"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow RaktaSetu to access your location in the background during an active, explicit donation session.",
+          "locationWhenInUsePermission": "Allow RaktaSetu to access your location while using the app.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
+        }
+      ],
+      "expo-secure-store"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "raktasetu-donor"
+      }
+    }
+  }
+}

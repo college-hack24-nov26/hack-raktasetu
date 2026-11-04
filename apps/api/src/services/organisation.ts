@@ -1,7 +1,10 @@
+
 import { prisma } from '../lib/prisma';
 import { OrgRole, CampStatus, ApplicationStatus } from '@prisma/client';
 import { ROLE_PERMISSIONS, Permission } from '../middleware/rbac';
 import { normalizePhoneNumber } from './auth';
+import { RealtimeService } from './realtime';
+import { BloodBankLocationDTO, ConfirmLocationInput, OrgLocationStatus } from '@raktasetu/shared';
 
 export interface OrganisationApplicationInput {
   hospitalName: string;
@@ -13,6 +16,9 @@ export interface OrganisationApplicationInput {
   email: string;
   phone: string;
   componentTypes?: string[];
+  latitude?: number;
+  longitude?: number;
+  locationAddress?: string;
 }
 
 export interface OrganisationApplicationReviewInput {
@@ -122,6 +128,9 @@ export class OrganisationService {
         email: input.email.trim().toLowerCase(),
         phone: cleanPhone,
         componentTypes: input.componentTypes || ['PRBC', 'Whole Blood'],
+        latitude: input.latitude !== undefined && input.latitude !== null ? Number(input.latitude) : null,
+        longitude: input.longitude !== undefined && input.longitude !== null ? Number(input.longitude) : null,
+        locationAddress: input.locationAddress?.trim() || null,
         status: 'SUBMITTED',
       },
     });
@@ -163,8 +172,15 @@ export class OrganisationService {
       throw new Error(`Organisation application "${applicationId}" not found.`);
     }
 
-    // Authorization check: Must be the applicant or a Platform Administrator
-    const isApplicant = app.applicantUserId && app.applicantUserId === callingUser.id;
+    const user = await prisma.user.findUnique({
+      where: { id: callingUser.id },
+      select: { id: true, phoneNumber: true },
+    });
+
+    // Authorization check: Must be the applicant (by ID or matching phone) or a Platform Administrator
+    const isApplicant =
+      (app.applicantUserId && app.applicantUserId === callingUser.id) ||
+      Boolean(user?.phoneNumber && app.phone === user.phoneNumber);
     const isPlatformAdmin = callingUser.role === 'ADMIN';
 
     if (!isApplicant && !isPlatformAdmin) {
@@ -172,6 +188,38 @@ export class OrganisationService {
     }
 
     return app;
+  }
+
+  /**
+   * List all onboarding applications submitted by or associated with the calling user.
+   */
+  static async getMyApplications(callingUser: { id: string; role?: string }) {
+    const user = await prisma.user.findUnique({
+      where: { id: callingUser.id },
+      select: { id: true, phoneNumber: true },
+    });
+
+    const orConditions: any[] = [{ applicantUserId: callingUser.id }];
+    if (user?.phoneNumber) {
+      orConditions.push({ phone: user.phoneNumber });
+    }
+
+    return await prisma.organisationApplication.findMany({
+      where: {
+        OR: orConditions,
+      },
+      include: {
+        resultingOrg: {
+          select: {
+            id: true,
+            orgCode: true,
+            name: true,
+            status: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
   /**
@@ -300,6 +348,12 @@ export class OrganisationService {
             phone: app.phone,
             status: 'VERIFIED',
             hospitalCode: matchingCentre?.hospitalCode || null,
+            latitude: app.latitude ?? null,
+            longitude: app.longitude ?? null,
+            locationStatus: app.latitude !== null && app.longitude !== null ? 'CONFIRMED' : 'UNCONFIGURED',
+            locationConfirmedAt: app.latitude !== null && app.longitude !== null ? reviewedAt : null,
+            locationConfirmedBy: app.latitude !== null && app.longitude !== null ? reviewerUser.id : null,
+            locationAddress: app.locationAddress ?? null,
             verifiedAt: reviewedAt,
             verifiedBy: reviewerUser.id,
           },
@@ -308,14 +362,25 @@ export class OrganisationService {
         // Invariant 4: Atomically assign initial ORG_ADMIN membership to applicant
         let targetAdminUserId = app.applicantUserId;
         if (!targetAdminUserId && app.phone) {
-          const userByPhone = await tx.user.findUnique({
-            where: { phoneNumber: app.phone },
+          const cleanPhone = normalizePhoneNumber(app.phone);
+          let userByPhone = await tx.user.findUnique({
+            where: { phoneNumber: cleanPhone },
           });
-          if (userByPhone) {
-            targetAdminUserId = userByPhone.id;
+          if (!userByPhone) {
+            // Provision user account for the verified institutional applicant contact
+            userByPhone = await tx.user.create({
+              data: {
+                phoneNumber: cleanPhone,
+                name: app.contactPerson,
+                role: 'USER',
+                status: 'ACTIVE',
+              },
+            });
           }
+          targetAdminUserId = userByPhone.id;
         }
 
+        let membershipCreated = false;
         if (targetAdminUserId) {
           const existingMem = await tx.organisationMembership.findUnique({
             where: {
@@ -336,6 +401,7 @@ export class OrganisationService {
                 assignedBy: reviewerUser.id,
               },
             });
+            membershipCreated = true;
           }
         }
 
@@ -343,6 +409,7 @@ export class OrganisationService {
           where: { id: applicationId },
           data: {
             status: 'APPROVED',
+            applicantUserId: targetAdminUserId || app.applicantUserId || null,
             reviewNotes: review.reviewNotes?.trim() || null,
             reviewedBy: reviewerUser.id,
             reviewedAt,
@@ -359,8 +426,9 @@ export class OrganisationService {
             metadata: {
               applicationId,
               orgCode: cleanOrgCode,
-              applicantUserId: app.applicantUserId,
+              applicantUserId: targetAdminUserId || app.applicantUserId,
               reviewedBy: reviewerUser.id,
+              membershipCreated,
             },
           },
         });
@@ -368,6 +436,8 @@ export class OrganisationService {
         return {
           application: updatedApplication,
           organisation,
+          membershipProvisioned: membershipCreated,
+          adminUserId: targetAdminUserId || null,
         };
       }, { maxWait: 10000, timeout: 20000 });
     }
@@ -412,6 +482,7 @@ export class OrganisationService {
             id: true,
             name: true,
             status: true,
+            phoneNumber: true,
           },
         },
       },
@@ -425,8 +496,10 @@ export class OrganisationService {
       userStatus: m.user.status,
       role: m.role,
       isActive: m.isActive,
-      assignedAt: m.assignedAt.toISOString(),
+      assignedAt: m.assignedAt ? m.assignedAt.toISOString() : null,
       assignedBy: m.assignedBy,
+      phoneNumber: m.user.phoneNumber || null,
+      phone: m.user.phoneNumber || null,
     }));
   }
 
@@ -626,8 +699,75 @@ export class OrganisationService {
 
   /**
    * Get all active organisation memberships for a user with effective permissions.
+   * Invariant: Automatically reconciles active memberships for users with approved onboarding applications.
    */
   static async getUserMemberships(userId: string) {
+    // 1. Reconcile any approved applications for this user's phone number or applicantUserId
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, phoneNumber: true },
+    });
+
+    if (user?.phoneNumber) {
+      const approvedApps = await prisma.organisationApplication.findMany({
+        where: {
+          OR: [
+            { phone: user.phoneNumber },
+            { applicantUserId: user.id },
+          ],
+          status: 'APPROVED',
+          resultingOrgId: { not: null },
+        },
+      });
+
+      for (const app of approvedApps) {
+        if (!app.resultingOrgId) continue;
+
+        const existingMembership = await prisma.organisationMembership.findUnique({
+          where: {
+            userId_organisationId: {
+              userId: user.id,
+              organisationId: app.resultingOrgId,
+            },
+          },
+        });
+
+        if (!existingMembership) {
+          await prisma.organisationMembership.create({
+            data: {
+              userId: user.id,
+              organisationId: app.resultingOrgId,
+              role: 'ORG_ADMIN',
+              isActive: true,
+              assignedAt: app.reviewedAt || new Date(),
+              assignedBy: app.reviewedBy || 'SYSTEM',
+            },
+          });
+
+          if (app.applicantUserId !== user.id) {
+            await prisma.organisationApplication.update({
+              where: { id: app.id },
+              data: { applicantUserId: user.id },
+            });
+          }
+
+          await prisma.auditLog.create({
+            data: {
+              userId: user.id,
+              action: 'MEMBERSHIP_RECONCILED_FROM_APPROVED_APP',
+              resource: 'OrganisationMembership',
+              resourceId: app.resultingOrgId,
+              metadata: {
+                applicationId: app.id,
+                phoneNumber: user.phoneNumber,
+                role: 'ORG_ADMIN',
+              },
+            },
+          });
+        }
+      }
+    }
+
     const memberships = await prisma.organisationMembership.findMany({
       where: {
         userId,
@@ -650,6 +790,12 @@ export class OrganisationService {
       role: m.role,
       status: m.organisation.status,
       isActive: m.isActive,
+      latitude: m.organisation.latitude,
+      longitude: m.organisation.longitude,
+      locationStatus: m.organisation.locationStatus || 'UNCONFIGURED',
+      locationConfirmedAt: m.organisation.locationConfirmedAt ? m.organisation.locationConfirmedAt.toISOString() : null,
+      locationConfirmedBy: m.organisation.locationConfirmedBy,
+      locationAddress: m.organisation.locationAddress,
       assignedAt: m.assignedAt.toISOString(),
       permissions: ROLE_PERMISSIONS[m.role] || [],
     }));
@@ -728,21 +874,34 @@ export class OrganisationService {
       throw new Error('Could not resolve an active, accredited parent blood bank organisation for this camp.');
     }
 
+    let isDirectAdminScheduling = false;
     // If caller is an active member of this organisation, enforce staff camp:manage permission
     if (callerUserId) {
-      const membership = await prisma.organisationMembership.findUnique({
-        where: {
-          userId_organisationId: {
-            userId: callerUserId,
-            organisationId: resolvedOrgId,
-          },
-        },
+      const callerUser = await prisma.user.findUnique({
+        where: { id: callerUserId },
+        select: { id: true, role: true },
       });
 
-      if (membership && membership.isActive) {
-        const permissions = ROLE_PERMISSIONS[membership.role] || [];
-        if (!permissions.includes('camp:manage')) {
-          throw new Error(`Role "${membership.role}" does not have permission to register camps for this organisation.`);
+      if (callerUser?.role === 'ADMIN') {
+        isDirectAdminScheduling = true;
+      } else {
+        const membership = await prisma.organisationMembership.findUnique({
+          where: {
+            userId_organisationId: {
+              userId: callerUserId,
+              organisationId: resolvedOrgId,
+            },
+          },
+        });
+
+        if (membership && membership.isActive) {
+          const permissions = ROLE_PERMISSIONS[membership.role] || [];
+          if (!permissions.includes('camp:manage')) {
+            throw new Error(`Role "${membership.role}" does not have permission to register camps for this organisation.`);
+          }
+          if (membership.role === 'ORG_ADMIN') {
+            isDirectAdminScheduling = true;
+          }
         }
       }
       // If not an organisation member, caller is an external community organizer proposing a camp for the blood bank to review
@@ -772,6 +931,9 @@ export class OrganisationService {
       creatorUserId = existingUser.id;
     }
 
+    const initialStatus = isDirectAdminScheduling ? 'APPROVED' : 'PROPOSED';
+    const initialStaffActive = isDirectAdminScheduling;
+
     const camp = await prisma.camp.create({
       data: {
         campCode,
@@ -785,14 +947,17 @@ export class OrganisationService {
         stateCode: input.stateCode || 27,
         expectedDonors: input.expectedDonors || 50,
         coordinatorContact: input.coordinatorContact?.trim() || null,
-        status: 'PROPOSED',
+        status: initialStatus,
+        isReadyForCollection: false, // Mandatory operational readiness verification strictly required before collection
+        approvedById: isDirectAdminScheduling ? callerUserId : null,
+        approvedAt: isDirectAdminScheduling ? new Date() : null,
         hospitalCode: resolvedHospitalCode,
         organisationId: resolvedOrgId,
         createdById: creatorUserId,
       },
     });
 
-    // Automatically designate creator as CAMP_ADMIN (inactive operational state until parent-bank approval)
+    // Automatically designate creator as CAMP_ADMIN (active for direct admin scheduling, inactive pending approval for proposals)
     if (creatorUserId) {
       await prisma.campStaffAssignment.upsert({
         where: {
@@ -802,13 +967,15 @@ export class OrganisationService {
             role: 'CAMP_ADMIN',
           },
         },
-        update: {},
+        update: {
+          isActive: initialStaffActive,
+        },
         create: {
           campId: camp.id,
           userId: creatorUserId,
           organisationId: resolvedOrgId,
           role: 'CAMP_ADMIN',
-          isActive: false, // inactive operational state until approval
+          isActive: initialStaffActive,
           assignedBy: creatorUserId,
         },
       });
@@ -817,7 +984,7 @@ export class OrganisationService {
     await prisma.auditLog.create({
       data: {
         userId: callerUserId || null,
-        action: 'CAMP_PROPOSED',
+        action: isDirectAdminScheduling ? 'CAMP_SCHEDULED_INTERNALLY' : 'CAMP_PROPOSED',
         resource: 'Camp',
         resourceId: camp.id,
         metadata: {
@@ -826,6 +993,8 @@ export class OrganisationService {
           hospitalCode: resolvedHospitalCode,
           organisationId: resolvedOrgId,
           createdById: creatorUserId,
+          directScheduling: isDirectAdminScheduling,
+          initialStatus,
         },
       },
     });
@@ -843,7 +1012,7 @@ export class OrganisationService {
    */
   static async updateCampStatus(
     campId: string,
-    callerUser: { id: string; role: string },
+    callerUser: { id?: string; userId?: string; role: string },
     newStatus: CampStatus,
     reason?: string
   ) {
@@ -856,13 +1025,14 @@ export class OrganisationService {
     }
 
     // Check authorization: Must be Platform ADMIN or ORG_ADMIN of the associated organisation
-    let isAuthorized = callerUser.role === 'ADMIN';
+    const callerId = callerUser?.userId || callerUser?.id;
+    let isAuthorized = callerUser?.role === 'ADMIN';
 
-    if (!isAuthorized && camp.organisationId) {
+    if (!isAuthorized && camp.organisationId && callerId) {
       const membership = await prisma.organisationMembership.findUnique({
         where: {
           userId_organisationId: {
-            userId: callerUser.id,
+            userId: callerId,
             organisationId: camp.organisationId,
           },
         },
@@ -877,9 +1047,9 @@ export class OrganisationService {
       throw new Error('Permission denied: Only organisation administrators or platform admins can update camp approval status.');
     }
 
-    // Invariant: Camp creator cannot approve their own camp proposal
-    if (newStatus === 'APPROVED' && camp.createdById && camp.createdById === callerUser.id) {
-      throw new Error('Conflict of interest: Camp creator cannot approve their own camp proposal. Parent blood bank administrator approval is required.');
+    // Invariant: Camp creator cannot approve or reject their own camp proposal (Conflict of Interest prevention)
+    if (['APPROVED', 'REJECTED'].includes(newStatus) && camp.createdById && callerId && camp.createdById === callerId) {
+      throw new Error('Conflict of interest: Camp creator cannot approve or reject their own camp proposal. Parent blood bank administrator approval is required.');
     }
 
     // State machine validation
@@ -926,7 +1096,7 @@ export class OrganisationService {
         },
         update: {
           isActive: true,
-          assignedBy: callerUser.id,
+          assignedBy: callerId!,
           assignedAt: new Date(),
           revokedAt: null,
           revokedBy: null,
@@ -937,7 +1107,7 @@ export class OrganisationService {
           organisationId: camp.organisationId!,
           role: 'CAMP_ADMIN',
           isActive: true,
-          assignedBy: callerUser.id,
+          assignedBy: callerId!,
         },
       });
     }
@@ -1169,6 +1339,152 @@ export class OrganisationService {
         status: c.status,
         count: c._count.id,
       })),
+    };
+  }
+
+  /**
+   * Retrieves confirmed GPS location and configuration status for an organisation.
+   */
+  static async getLocation(organisationId: string): Promise<BloodBankLocationDTO> {
+    const org = await prisma.organisation.findUnique({
+      where: { id: organisationId },
+      select: {
+        id: true,
+        orgCode: true,
+        name: true,
+        latitude: true,
+        longitude: true,
+        locationStatus: true,
+        locationConfirmedAt: true,
+        locationConfirmedBy: true,
+        locationAddress: true,
+      },
+    });
+
+    if (!org) {
+      throw new Error('Organisation not found.');
+    }
+
+    return {
+      organisationId: org.id,
+      orgCode: org.orgCode,
+      name: org.name,
+      latitude: org.latitude,
+      longitude: org.longitude,
+      locationStatus: (org.locationStatus as OrgLocationStatus) || 'UNCONFIGURED',
+      locationConfirmedAt: org.locationConfirmedAt ? org.locationConfirmedAt.toISOString() : null,
+      locationConfirmedBy: org.locationConfirmedBy,
+      locationAddress: org.locationAddress,
+    };
+  }
+
+  /**
+   * Explicitly sets or updates the confirmed location of a Blood Bank.
+   * Requires ORG_ADMIN or operational admin privileges.
+   * Creates an audit log and dispatches a realtime notification.
+   */
+  static async confirmLocation(
+    organisationId: string,
+    confirmedByUserId: string,
+    input: ConfirmLocationInput
+  ): Promise<BloodBankLocationDTO> {
+    if (
+      typeof input.latitude !== 'number' ||
+      isNaN(input.latitude) ||
+      input.latitude < -90 ||
+      input.latitude > 90
+    ) {
+      throw new Error('Valid latitude between -90 and 90 is required.');
+    }
+
+    if (
+      typeof input.longitude !== 'number' ||
+      isNaN(input.longitude) ||
+      input.longitude < -180 ||
+      input.longitude > 180
+    ) {
+      throw new Error('Valid longitude between -180 and 180 is required.');
+    }
+
+    const existingOrg = await prisma.organisation.findUnique({
+      where: { id: organisationId },
+    });
+
+    if (!existingOrg) {
+      throw new Error('Organisation not found.');
+    }
+
+    const confirmedAt = new Date();
+    const address = input.locationAddress?.trim() || existingOrg.locationAddress || existingOrg.address || null;
+
+    const result = await prisma.$transaction(async (tx) => {
+      const updated = await tx.organisation.update({
+        where: { id: organisationId },
+        data: {
+          latitude: input.latitude,
+          longitude: input.longitude,
+          locationStatus: 'CONFIRMED',
+          locationConfirmedAt: confirmedAt,
+          locationConfirmedBy: confirmedByUserId,
+          locationAddress: address,
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          userId: confirmedByUserId,
+          action:
+            existingOrg.locationStatus === 'CONFIRMED'
+              ? 'ORGANISATION_LOCATION_UPDATED'
+              : 'ORGANISATION_LOCATION_CONFIRMED',
+          resource: 'Organisation',
+          resourceId: organisationId,
+          metadata: {
+            previous: {
+              latitude: existingOrg.latitude,
+              longitude: existingOrg.longitude,
+              locationStatus: existingOrg.locationStatus,
+              locationAddress: existingOrg.locationAddress,
+            },
+            updated: {
+              latitude: input.latitude,
+              longitude: input.longitude,
+              locationStatus: 'CONFIRMED',
+              locationAddress: address,
+            },
+            confirmedBy: confirmedByUserId,
+            confirmedAt: confirmedAt.toISOString(),
+          },
+        },
+      });
+
+      // Transactional realtime outbox event (payload minimized, no broad raw GPS broadcast)
+      await RealtimeService.publishOutboxEvent(tx, {
+        eventType: 'organisation.location_updated',
+        entityType: 'Organisation',
+        entityId: organisationId,
+        organisationId,
+        payload: {
+          organisationId,
+          locationStatus: 'CONFIRMED',
+          locationConfirmedAt: confirmedAt.toISOString(),
+          districtCode: updated.districtCode,
+        },
+      });
+
+      return updated;
+    });
+
+    return {
+      organisationId: result.id,
+      orgCode: result.orgCode,
+      name: result.name,
+      latitude: result.latitude,
+      longitude: result.longitude,
+      locationStatus: 'CONFIRMED',
+      locationConfirmedAt: result.locationConfirmedAt ? result.locationConfirmedAt.toISOString() : null,
+      locationConfirmedBy: result.locationConfirmedBy,
+      locationAddress: result.locationAddress,
     };
   }
 }

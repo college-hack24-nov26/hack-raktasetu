@@ -1,0 +1,31 @@
+{
+  "name": "@raktasetu/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web",
+    "prebuild": "expo prebuild",
+    "prebuild:clean": "expo prebuild --clean",
+    "typecheck": "tsc --noEmit",
+    "test": "npm --workspace=@raktasetu/api exec -- tsx ../../apps/mobile/src/__tests__/mobile-client.test.ts"
+  },
+  "dependencies": {
+    "@raktasetu/shared": "file:../../packages/shared",
+    "expo": "~52.0.30",
+    "expo-constants": "~17.0.4",
+    "expo-location": "~18.0.5",
+    "expo-secure-store": "~14.0.1",
+    "expo-status-bar": "~2.0.1",
+    "expo-task-manager": "~12.0.4",
+    "react": "18.3.1",
+    "react-native": "0.76.7"
+  },
+  "devDependencies": {
+    "@types/react": "~18.3.12",
+    "typescript": "^5.3.3"
+  }
+}

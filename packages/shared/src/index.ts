@@ -86,6 +86,37 @@ export interface OrganisationApplicationInput {
   email: string;
   phone: string;
   componentTypes?: string[];
+  latitude?: number;
+  longitude?: number;
+  locationAddress?: string;
+}
+
+export type OrgLocationStatus = 'UNCONFIGURED' | 'CONFIRMED' | 'UNVERIFIED';
+
+export interface BloodBankLocationDTO {
+  organisationId: string;
+  orgCode?: string;
+  name?: string;
+  latitude: number | null;
+  longitude: number | null;
+  locationStatus: OrgLocationStatus;
+  locationConfirmedAt: string | null;
+  locationConfirmedBy: string | null;
+  locationAddress: string | null;
+}
+
+export interface ConfirmLocationInput {
+  latitude: number;
+  longitude: number;
+  locationAddress?: string;
+}
+
+export interface RouteDirectionsDTO {
+  distanceKm: number;
+  durationMinutes: number;
+  profile: string;
+  source: 'mapbox_directions';
+  cached?: boolean;
 }
 
 export interface OrganisationApplicationReviewInput {
@@ -731,12 +762,176 @@ export type RealtimeEventType =
   | 'camp.collection_unit_confirmed'
   | 'camp.closed'
   | 'donor.eligibility_updated'
+  | 'blood_request.created'
   | 'blood_request.status_changed'
   | 'donor_invitation.response_changed'
   | 'hospital_issue.authorised'
   | 'hospital_issue.dispatched'
   | 'hospital_issue.received'
-  | 'component.disposition_recorded';
+  | 'component.disposition_recorded'
+  | 'camp.donor_registration_updated'
+  | 'donor_location.session_started'
+  | 'donor_location.updated'
+  | 'donor_location.session_ended'
+  | 'blood_request.matching_requested'
+  | 'blood_request.matching_searched'
+  | 'blood_request.matching_released'
+  | 'blood_request.donor_invited'
+  | 'donor_intake.arrival_recorded'
+  | 'clinical_assessment.completed'
+  | 'blood_collection.completed'
+  | 'laboratory_testing.completed'
+  | 'blood_request.allocated'
+  | 'traceability.updated'
+  | 'organisation.location_updated';
+
+// ----------------------------------------------------
+// Donor Matching & Candidate Release Types (Phase 3)
+// ----------------------------------------------------
+
+export type DonorMatchingStatus =
+  | 'NOT_REQUESTED'
+  | 'REQUESTED'
+  | 'SEARCH_RUNNING'
+  | 'CANDIDATES_FOUND'
+  | 'AWAITING_ADMIN_REVIEW'
+  | 'RELEASED'
+  | 'NO_CANDIDATES'
+  | 'CANCELLED';
+
+export type DonorMatchLevel = 'LEVEL_1_CENTRE' | 'LEVEL_2_DISTRICT' | 'LEVEL_3_EXPANDED';
+export type DonorProximityTier = 'FRESH_GPS' | 'STALE_GPS' | 'REGISTERED_AREA' | 'UNKNOWN';
+
+export interface MatchingRequestMetadata {
+  id: string;
+  requestedByUserId: string;
+  requestingOrgId: string;
+  requestedShortfall: number;
+  status: DonorMatchingStatus;
+  searchScope: 'EXACT_CENTRE' | 'DISTRICT_EXPANDED' | 'OUT_OF_DISTRICT';
+  requestedAt: string;
+  lastSearchedAt?: string;
+  reviewedAt?: string;
+  reviewedById?: string;
+  releasedAt?: string;
+  releasedById?: string;
+  releasedCandidateIds?: string[];
+  candidatesCount?: number;
+  expansionReason?: string;
+  releaseNotes?: string;
+}
+
+export interface RankedDonorCandidateDTO {
+  donorId: string;
+  displayName: string;
+  bloodGroup: string;
+  isExactBloodGroupMatch: boolean;
+  isCompatible: boolean;
+  matchLevel: DonorMatchLevel;
+  matchReason: string;
+  proximityTier: DonorProximityTier;
+  distanceKm: number | null;
+  distanceType?: 'straight_line' | 'road';
+  locationFreshness?: 'FRESH' | 'STALE' | 'UNAVAILABLE';
+  locationUpdatedAt?: string | null;
+  roadDistanceKm?: number | null;
+  estimatedDurationMinutes?: number | null;
+  isRegularDonor: boolean;
+  completedDonationsCount: number;
+  lastDonationDate: string | null;
+  isAvailable: boolean;
+  districtCode: number | null;
+  locality: string | null;
+  selectionRank: number;
+  contactNumber?: string | null;
+  disclosureAuthorized?: boolean;
+  invitationId?: string | null;
+  invitationStatus?: 'PENDING' | 'ACCEPTED' | 'DECLINED' | null;
+  respondedAt?: string | null;
+  arrived?: boolean;
+  intakeStatus?: string | null;
+  attendanceId?: string | null;
+}
+
+
+// ----------------------------------------------------
+// Phase 10: Donor Live-Location Tracking & Sharing Types
+// ----------------------------------------------------
+
+export type LocationSessionStatus = 'ACTIVE' | 'STOPPED' | 'REVOKED' | 'EXPIRED';
+
+export type DonorLocationFreshness = 'FRESH' | 'STALE' | 'UNAVAILABLE';
+
+export interface LocationSessionDTO {
+  id: string;
+  donorUserId: string;
+  status: LocationSessionStatus;
+  consentGranted: boolean;
+  consentVersion: string;
+  consentGrantedAt: string;
+  startedAt: string;
+  endedAt?: string | null;
+  endedReason?: string | null;
+}
+
+export interface DonorLatestLocationDTO {
+  id: string;
+  donorUserId: string;
+  sessionId: string;
+  latitude: number;
+  longitude: number;
+  accuracy: number;
+  heading?: number | null;
+  speed?: number | null;
+  batteryLevel?: number | null;
+  deviceTimestamp: string;
+  serverReceivedAt: string;
+  isStale: boolean;
+}
+
+export interface AdminDonorLocationSnapshotDTO {
+  donorUserId: string;
+  donorName?: string | null;
+  phoneNumber?: string | null;
+  bloodGroup?: string | null;
+  stateCode?: number | null;
+  districtCode?: number | null;
+  cityOrLocality?: string | null;
+  sessionId: string;
+  sessionStatus: LocationSessionStatus;
+  startedAt: string;
+  endedAt?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  accuracy?: number | null;
+  heading?: number | null;
+  speed?: number | null;
+  batteryLevel?: number | null;
+  deviceTimestamp?: string | null;
+  serverReceivedAt?: string | null;
+  isStale: boolean;
+  freshness: DonorLocationFreshness;
+}
+
+export interface StartLocationSessionInput {
+  consentGranted: boolean;
+  consentVersion: string;
+}
+
+export interface StopLocationSessionInput {
+  reason?: 'DONOR_STOPPED' | 'DONOR_REVOKED';
+}
+
+export interface UpdateLocationInput {
+  sessionId?: string;
+  latitude: number;
+  longitude: number;
+  accuracy: number;
+  heading?: number;
+  speed?: number;
+  batteryLevel?: number;
+  deviceTimestamp: string;
+}
 
 export interface RealtimeEventEnvelope<T = any> {
   eventId: string;
@@ -764,3 +959,140 @@ export type WebSocketServerMessage =
   | { type: 'event'; event: RealtimeEventEnvelope }
   | { type: 'pong' }
   | { type: 'error'; code: string; message: string };
+
+// ----------------------------------------------------
+// Phase 5: Clinical Lifecycle, Intake & Traceability Types
+// ----------------------------------------------------
+
+export interface DonorIntakeRecordDTO {
+  donorId: string;
+  donorUserId?: string;
+  attendanceId: string;
+  campId: string;
+  arrivedAt: string;
+  arrivedById: string;
+  verificationNotes?: string | null;
+  intakeStatus: 'ARRIVED' | 'SCREENING_IN_PROGRESS' | 'CLEARED' | 'DEFERRED' | 'COLLECTION_COMPLETED';
+  screeningId?: string;
+  eligibilityDecision?: string;
+  clinicalNotes?: string;
+  collectionUnitId?: string;
+  componentUnitId?: string;
+  unitNumber?: string;
+  componentCode?: string;
+}
+
+export interface RecordDonorArrivalInput {
+  donorId: string;
+  verificationNotes?: string;
+}
+
+export interface RecordIntakeClinicalScreeningInput {
+  attendanceId: string;
+  consentVersion?: string;
+  consentGiven: boolean;
+  eligibilityDecision: 'CLEARED' | 'TEMPORARY_DEFERRAL' | 'PERMANENT_DEFERRAL';
+  deferralCategory?: 'LOW_HEMOGLOBIN' | 'RECENT_ILLNESS' | 'MEDICATION' | 'WEIGHT_CRITERIA' | 'OTHER';
+  deferralDurationDays?: number;
+  clinicalNotes?: string;
+}
+
+export interface RecordIntakeCollectionInput {
+  attendanceId: string;
+  bloodGroup: string;
+  volumeMl?: number;
+  bagIdentifier?: string;
+  notes?: string;
+  componentType?: 'PRBC' | 'WHOLE_BLOOD' | 'FRESH_FROZEN_PLASMA' | 'PLATELET_CONCENTRATE';
+}
+
+export interface TraceabilityLineageDTO {
+  request: {
+    id: string;
+    bloodGroup: string;
+    component: string;
+    unitsRequested: number;
+    allocatedUnitsCount: number;
+    shortfallCount: number;
+    urgency: string;
+    status: string;
+    hospitalName?: string;
+    hospitalCode?: string | null;
+    createdAt: string;
+  };
+  matching?: {
+    status?: string;
+    searchScope?: string;
+    releasedAt?: string;
+    releasedCandidatesCount?: number;
+  };
+  invitations: Array<{
+    donorId: string;
+    status: string;
+    respondedAt?: string | null;
+    disclosureAuthorized: boolean;
+  }>;
+  donorIntake?: DonorIntakeRecordDTO | null;
+  clinicalScreening?: {
+    id: string;
+    eligibilityDecision: string;
+    consentGiven: boolean;
+    consentVersion: string;
+    screenedBy: string;
+    deferralCategory?: string | null;
+    deferralDurationDays?: number | null;
+    clinicalNotes?: string | null;
+    createdAt: string;
+  } | null;
+  collectionUnit?: {
+    id: string;
+    unitNumber: string;
+    bloodGroup: string;
+    volumeMl?: number | null;
+    status: string;
+    collectedAt: string;
+    collectedBy: string;
+  } | null;
+  laboratoryTests: Array<{
+    id: string;
+    testType: string;
+    category: string;
+    resultOutcome?: string | null;
+    status: string;
+    verifiedAt?: string | null;
+    verifiedBy?: string | null;
+  }>;
+  clinicalRelease?: {
+    id: string;
+    decision: string;
+    reason: string;
+    clinicalProtocolRef?: string | null;
+    decisionTimestamp: string;
+    authorizedClinicalUserId: string;
+  } | null;
+  componentUnit?: {
+    id: string;
+    componentCode: string;
+    componentType: string;
+    bloodGroup: string;
+    status: string;
+    expiresAt: string;
+    derivedAt: string;
+  } | null;
+  hospitalIssueOrder?: {
+    id: string;
+    orderNumber: string;
+    status: string;
+    authorisedAt: string;
+    dispatchedAt?: string | null;
+    receivedAt?: string | null;
+    transportDetails?: any;
+  } | null;
+  dualReceiptConfirmation?: {
+    isPatientAcknowledged: boolean;
+    patientAcknowledgedAt?: string | null;
+    isHospitalReceived: boolean;
+    hospitalReceivedAt?: string | null;
+    receiptNotes?: string | null;
+  };
+}

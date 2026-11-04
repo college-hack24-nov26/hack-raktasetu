@@ -1,0 +1,79 @@
+flowchart TB
+    classDef clientLayer fill:#1e293b,stroke:#0f172a,color:#f8fafc,stroke-width:2px;
+    classDef edgeLayer fill:#0369a1,stroke:#0284c7,color:#ffffff,stroke-width:2px;
+    classDef apiLayer fill:#b91c1c,stroke:#991b1b,color:#ffffff,stroke-width:2px;
+    classDef serviceLayer fill:#047857,stroke:#059669,color:#ffffff,stroke-width:2px;
+    classDef dataLayer fill:#475569,stroke:#334155,color:#ffffff,stroke-width:2px;
+
+    subgraph ClientTiers ["1. Presentation & Client Tier"]
+        WebApp["Next.js 16 Web Application\n(React 19, Tailwind CSS 4)\nPort: 3000"]:::clientLayer
+        MobileApp["Expo React Native Mobile App\n(Android Native / Expo 52)\nPort: 8081 / APK"]:::clientLayer
+    end
+
+    subgraph TransportGateway ["2. Network & Gateway Tier"]
+        HTTPClient["HTTP/1.1 REST Client\n(Fetch API / authFetch / ApiClient)"]:::edgeLayer
+        WSClient["WebSocket Client\n(Native WebSocket / useRealtime / realtimeClient)"]:::edgeLayer
+        CORSAuth["CORS & Bearer JWT Middleware\n(requireAuth, requireOrgPermission)"]:::edgeLayer
+    end
+
+    subgraph BackendAPI ["3. Application & API Routing Tier (Port 4000)"]
+        ExpressApp["Express.js 4 REST Framework\n(/api/v1/*)"]:::apiLayer
+        WSServer["WebSocket Server (ws)\n(/ws endpoint)"]:::apiLayer
+    end
+
+    subgraph CoreServices ["4. Domain Services Tier"]
+        AuthSvc["Auth & RBAC Service\n(auth.ts, rbac.ts)"]:::serviceLayer
+        CoordSvc["Request & Routing Service\n(bloodRequestCoordination.ts)"]:::serviceLayer
+        MatchingSvc["Admin Matching & Ranking\n(adminMatchingService.ts)"]:::serviceLayer
+        CampSvc["Camp Operations & Intake\n(campOperations.ts)"]:::serviceLayer
+        TraceSvc["Traceability & Lifecycle\n(traceability.ts)"]:::serviceLayer
+        InventorySvc["Processing, Lab & Inventory\n(processingAndInventory.ts)"]:::serviceLayer
+        HandoverSvc["Handover & Transport\n(handover.ts, hospitalIntegration.ts)"]:::serviceLayer
+        LocationSvc["Live Donor Location Service\n(donorLocationService.ts)"]:::serviceLayer
+        RealtimeSvc["Realtime Broker & Outbox\n(realtime.ts)"]:::serviceLayer
+    end
+
+    subgraph PersistenceTier ["5. Data & Persistence Tier"]
+        PrismaORM["Prisma Client ORM 6.4.1\n(Connection Pooling, Multi-tenancy)"]:::dataLayer
+        NeonPostgres[("Neon PostgreSQL Cloud DB\n(33 Tables, ACID, JSONB)")]:::dataLayer
+        OutboxTable[("Transactional Outbox\n(outbox_events)")]:::dataLayer
+    end
+
+    %% Wiring
+    WebApp --> HTTPClient
+    WebApp --> WSClient
+    MobileApp --> HTTPClient
+    MobileApp --> WSClient
+
+    HTTPClient --> CORSAuth --> ExpressApp
+    WSClient --> WSServer
+
+    ExpressApp --> AuthSvc
+    ExpressApp --> CoordSvc
+    ExpressApp --> MatchingSvc
+    ExpressApp --> CampSvc
+    ExpressApp --> TraceSvc
+    ExpressApp --> InventorySvc
+    ExpressApp --> HandoverSvc
+    ExpressApp --> LocationSvc
+
+    WSServer <--> RealtimeSvc
+
+    AuthSvc --> PrismaORM
+    CoordSvc --> PrismaORM
+    MatchingSvc --> PrismaORM
+    CampSvc --> PrismaORM
+    TraceSvc --> PrismaORM
+    InventorySvc --> PrismaORM
+    HandoverSvc --> PrismaORM
+    LocationSvc --> PrismaORM
+    RealtimeSvc --> PrismaORM
+
+    CoordSvc -.-> RealtimeSvc
+    MatchingSvc -.-> RealtimeSvc
+    InventorySvc -.-> RealtimeSvc
+    HandoverSvc -.-> RealtimeSvc
+
+    PrismaORM --> NeonPostgres
+    PrismaORM --> OutboxTable
+

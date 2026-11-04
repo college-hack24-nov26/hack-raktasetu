@@ -1,0 +1,75 @@
+flowchart LR
+    classDef webComponent fill:#3b82f6,stroke:#1d4ed8,color:#ffffff;
+    classDef apiRoute fill:#ef4444,stroke:#b91c1c,color:#ffffff;
+    classDef serviceComp fill:#10b981,stroke:#047857,color:#ffffff;
+    classDef modelComp fill:#8b5cf6,stroke:#6d28d9,color:#ffffff;
+
+    subgraph WebPages ["Web App Views & Pages (apps/web)"]
+        ReqNewPage["/requests/new\n(Patient Request Form)"]:::webComponent
+        ReqStatusPage["/requests/[id]\n(Patient Tracking)"]:::webComponent
+        OrgPortal["/organisation/portal\n(Master Blood Bank Portal)"]:::webComponent
+        SubHospView["HospitalIntegrationView\n(Incoming Requests & Shortfall)"]:::webComponent
+        SubProcView["ProcessingAndInventoryView\n(Lab, Testing, Derivation)"]:::webComponent
+        SubLiveMap["LiveDonorMapView\n(Realtime Donor GPS Markers)"]:::webComponent
+        SubAdminView["BloodRequestOperationsView\n(Admin Matching Run & Release)"]:::webComponent
+    end
+
+    subgraph APIRoutes ["Express Routes (apps/api/src/routes)"]
+        R_Requests["requestsRouter\n(/blood-requests)"]:::apiRoute
+        R_Hospital["hospitalRouter\n(/organisation/:id/incoming-requests)"]:::apiRoute
+        R_AdminMatch["adminMatchingRouter\n(/admin/donor-matching/*)"]:::apiRoute
+        R_Trace["traceabilityRouter\n(/traceability/*)"]:::apiRoute
+        R_Inventory["inventoryRouter\n(/organisations/:id/inventory/*)"]:::apiRoute
+        R_Location["donorLocationRouter\n(/donor-location/*)"]:::apiRoute
+    end
+
+    subgraph DomainServices ["Services (apps/api/src/services)"]
+        S_Coord["patientRequestCoordination.ts\nbloodRequestCoordination.ts"]:::serviceComp
+        S_Hospital["hospitalIntegration.ts"]:::serviceComp
+        S_AdminMatch["adminMatchingService.ts"]:::serviceComp
+        S_Trace["traceability.ts"]:::serviceComp
+        S_Inventory["processingAndInventory.ts"]:::serviceComp
+        S_Location["donorLocationService.ts"]:::serviceComp
+        S_Realtime["realtime.ts"]:::serviceComp
+    end
+
+    subgraph DBEntities ["Prisma Models (prisma/schema.prisma)"]
+        M_Request[("BloodRequest")]:::modelComp
+        M_Org[("Organisation")]:::modelComp
+        M_Donor[("DonorProfile")]:::modelComp
+        M_Unit[("CollectionUnit\nComponentUnit")]:::modelComp
+        M_Lab[("LaboratoryTestRecord")]:::modelComp
+        M_Release[("ClinicalReleaseRecord")]:::modelComp
+        M_Order[("HospitalIssueOrder")]:::modelComp
+        M_Audit[("AuditLog")]:::modelComp
+        M_Location[("DonorLatestLocation")]:::modelComp
+    end
+
+    %% Linkages
+    ReqNewPage --> R_Requests --> S_Coord --> M_Request
+    ReqStatusPage --> R_Requests
+
+    OrgPortal --> SubHospView
+    OrgPortal --> SubProcView
+    OrgPortal --> SubLiveMap
+    OrgPortal --> SubAdminView
+
+    SubHospView --> R_Hospital --> S_Hospital --> M_Request
+    SubHospView --> S_Hospital --> M_Order
+
+    SubAdminView --> R_AdminMatch --> S_AdminMatch --> M_Request
+    SubAdminView --> S_AdminMatch --> M_Donor
+    SubAdminView --> S_AdminMatch --> M_Audit
+
+    SubProcView --> R_Inventory --> S_Inventory --> M_Unit
+    SubProcView --> R_Trace --> S_Trace --> M_Lab
+    SubProcView --> S_Trace --> M_Release
+
+    SubLiveMap --> R_Location --> S_Location --> M_Location
+
+    S_Coord -.-> S_Realtime
+    S_Hospital -.-> S_Realtime
+    S_AdminMatch -.-> S_Realtime
+    S_Trace -.-> S_Realtime
+    S_Inventory -.-> S_Realtime
+

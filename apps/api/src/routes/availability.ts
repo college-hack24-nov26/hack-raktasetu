@@ -15,30 +15,47 @@ import {
 export const availabilityRouter = Router();
 
 /**
- * Normalizes blood group string (e.g., 'B+' or 'B_POS' or 'B+Ve')
+ * Normalizes blood group string (e.g., 'B+', 'B_POS', 'AB+', 'AB_POS', 'AB+Ve', 'B Positive')
  */
-function normalizeBloodGroup(input?: string): { display: string; dbEnum: string; eRaktKoshCode?: number } | null {
+export function normalizeBloodGroup(input?: string): { display: string; dbEnum: string; eRaktKoshCode?: number } | null {
   if (!input) return null;
-  const cleaned = input.trim().toUpperCase().replace('VE', '');
+  let raw = input.toUpperCase().trim();
 
-  if (cleaned === 'A+' || cleaned === 'A_POS') return { display: 'A+', dbEnum: 'A_POS', eRaktKoshCode: 11 };
-  if (cleaned === 'A-' || cleaned === 'A_NEG') return { display: 'A-', dbEnum: 'A_NEG', eRaktKoshCode: 12 };
-  if (cleaned === 'B+' || cleaned === 'B_POS') return { display: 'B+', dbEnum: 'B_POS', eRaktKoshCode: 13 };
-  if (cleaned === 'B-' || cleaned === 'B_NEG') return { display: 'B-', dbEnum: 'B_NEG', eRaktKoshCode: 14 };
-  if (cleaned === 'AB+' || cleaned === 'AB_POS') return { display: 'AB+', dbEnum: 'AB_POS', eRaktKoshCode: 15 };
-  if (cleaned === 'AB-' || cleaned === 'AB_NEG') return { display: 'AB-', dbEnum: 'AB_NEG', eRaktKoshCode: 16 };
-  if (cleaned === 'O+' || cleaned === 'O_POS') return { display: 'O+', dbEnum: 'O_POS', eRaktKoshCode: 17 };
-  if (cleaned === 'O-' || cleaned === 'O_NEG') return { display: 'O-', dbEnum: 'O_NEG', eRaktKoshCode: 18 };
+  // If query string had unencoded '+' that Express decoded to a space ' ' (e.g., "AB " or "B ")
+  if (input.endsWith(' ') && !raw.includes('+') && !raw.includes('-')) {
+    raw = raw + '+';
+  }
+
+  // Strip +VE or -VE suffixes safely without corrupting words like POSITIVE
+  let cleaned = raw.replace(/([+-])VE$/i, '$1').trim();
+
+  // Handle _POS / _NEG / POSITIVE / NEGATIVE / POS / NEG
+  cleaned = cleaned
+    .replace(/[_\s]+POS(ITIVE)?$/i, '+')
+    .replace(/[_\s]+NEG(ATIVE)?$/i, '-')
+    .replace(/\s+/g, '+');
+
+  if (cleaned === 'A+') return { display: 'A+', dbEnum: 'A_POS', eRaktKoshCode: 11 };
+  if (cleaned === 'A-') return { display: 'A-', dbEnum: 'A_NEG', eRaktKoshCode: 12 };
+  if (cleaned === 'B+') return { display: 'B+', dbEnum: 'B_POS', eRaktKoshCode: 13 };
+  if (cleaned === 'B-') return { display: 'B-', dbEnum: 'B_NEG', eRaktKoshCode: 14 };
+  if (cleaned === 'AB+') return { display: 'AB+', dbEnum: 'AB_POS', eRaktKoshCode: 15 };
+  if (cleaned === 'AB-') return { display: 'AB-', dbEnum: 'AB_NEG', eRaktKoshCode: 16 };
+  if (cleaned === 'O+') return { display: 'O+', dbEnum: 'O_POS', eRaktKoshCode: 17 };
+  if (cleaned === 'O-') return { display: 'O-', dbEnum: 'O_NEG', eRaktKoshCode: 18 };
 
   return null;
 }
 
-function mapComponentStringToType(input?: string): string | null {
+/**
+ * Normalizes component query string to database ComponentType enum
+ */
+export function mapComponentStringToType(input?: string): string | null {
   if (!input) return null;
-  const s = input.toLowerCase();
+  const s = input.toLowerCase().replace(/[\-_]/g, ' ');
   if (s.includes('prbc') || s.includes('packed red')) return 'PRBC';
   if (s.includes('whole blood')) return 'WHOLE_BLOOD';
-  if (s.includes('fresh frozen') || s.includes('ffp')) return 'FRESH_FROZEN_PLASMA';
+  if (s.includes('fresh frozen') || s.includes('ffp') || s.includes('plasma')) return 'FRESH_FROZEN_PLASMA';
   if (s.includes('platelet')) return 'PLATELET_CONCENTRATE';
   if (s.includes('cryoprecipitate')) return 'CRYOPRECIPITATE';
   if (s.includes('buffy')) return 'BUFFY_COAT';
@@ -46,8 +63,119 @@ function mapComponentStringToType(input?: string): string | null {
 }
 
 /**
+ * Determines availability ranking tier for availability-first sorting:
+ * Rank 1: Centres with verified, eligible positive stock (status === 'available', not stale, reportedQuantity > 0)
+ * Rank 2: Centres whose stock is unknown, stale, or cannot currently be verified
+ * Rank 3: Centres with confirmed zero eligible units (status === 'zero' or reportedQuantity === 0)
+ */
+export function getAvailabilityRank(item: any): number {
+  const isStale = item.availability?.isStale || item.availability?.status === 'stale';
+  const qty = item.availability?.reportedQuantity;
+  const status = item.availability?.status;
+
+  // Rank 1: Verified positive stock
+  if (!isStale && status === 'available' && qty !== null && qty !== undefined && qty > 0) {
+    return 1;
+  }
+  // Rank 3: Confirmed zero stock
+  if (!isStale && (status === 'zero' || qty === 0)) {
+    return 3;
+  }
+  // Rank 2: Unknown, stale, or unverified
+  return 2;
+}
+
+/**
+ * Sorts blood availability search results availability-first:
+ * 1. Positive eligible stock (highest units first)
+ * 2. Unknown / stale / unverified stock
+ * 3. Confirmed zero stock
+ * Secondary tiebreaker: Centre name ascending, then hospitalCode
+ */
+export function sortAvailabilityResults<T extends { bloodCentre?: any; availability?: any }>(items: T[]): T[] {
+  return [...items].sort((a, b) => {
+    const rankA = getAvailabilityRank(a);
+    const rankB = getAvailabilityRank(b);
+
+    if (rankA !== rankB) {
+      return rankA - rankB;
+    }
+
+    // Inside Rank 1 (positive stock): highest available units first
+    if (rankA === 1) {
+      const qtyA = a.availability?.reportedQuantity ?? 0;
+      const qtyB = b.availability?.reportedQuantity ?? 0;
+      if (qtyA !== qtyB) return qtyB - qtyA;
+    }
+
+    // Secondary stable ordering: centre name ascending
+    const nameA = a.bloodCentre?.hospitalName || '';
+    const nameB = b.bloodCentre?.hospitalName || '';
+    const nameComp = nameA.localeCompare(nameB);
+    if (nameComp !== 0) return nameComp;
+
+    const codeA = a.bloodCentre?.hospitalCode || '';
+    const codeB = b.bloodCentre?.hospitalCode || '';
+    return codeA.localeCompare(codeB);
+  });
+}
+
+function computeAvailabilityMeta(
+  items: any[],
+  extra: {
+    selectedSource: 'internal' | 'external' | 'all';
+    participatingCount: number;
+    externalCount: number;
+    stateCode: number;
+    districtCode: number;
+    districtName: string;
+    component: string;
+    bloodGroup: string | null;
+    isMappingVerified?: boolean;
+    isLiveDirectory?: boolean;
+    isLiveAvailability?: boolean;
+  }
+) {
+  const totalCentresSearched = items.length;
+  const centresWithStock = items.filter((r) => getAvailabilityRank(r) === 1).length;
+  const centresWithZeroStock = items.filter((r) => getAvailabilityRank(r) === 3).length;
+  const centresUnknownOrStale = items.filter((r) => getAvailabilityRank(r) === 2).length;
+
+  let notes = '';
+  if (extra.selectedSource === 'internal') {
+    notes = centresWithStock > 0
+      ? `${centresWithStock} of ${totalCentresSearched} RaktaSetu participating centre(s) have verified available stock for ${extra.bloodGroup || 'all groups'} ${extra.component}. (${centresWithZeroStock} confirmed zero stock)`
+      : `${totalCentresSearched} RaktaSetu participating centre(s) searched in ${extra.districtName}. Currently 0 centres report available stock for ${extra.bloodGroup || ''} ${extra.component}.`;
+  } else if (extra.selectedSource === 'external') {
+    notes = `${totalCentresSearched} external e-RaktKosh blood bank(s) searched in ${extra.districtName} (${centresWithStock} reporting stock, ${centresWithZeroStock} reporting zero, ${centresUnknownOrStale} unverified/stale). External figures are subject to direct verification.`;
+  } else {
+    notes = `${centresWithStock} of ${totalCentresSearched} centre(s) have available stock (${extra.participatingCount} participating, ${extra.externalCount} external).`;
+  }
+
+  return {
+    selectedSource: extra.selectedSource,
+    totalCentres: totalCentresSearched,
+    totalCentresSearched,
+    centresWithStock,
+    centresWithZeroStock,
+    centresUnknownOrStale,
+    participatingCentresCount: extra.participatingCount,
+    externalCentresCount: extra.externalCount,
+    stateCode: extra.stateCode,
+    districtCode: extra.districtCode,
+    districtName: extra.districtName,
+    component: extra.component,
+    bloodGroup: extra.bloodGroup,
+    mappingVerified: extra.isMappingVerified ?? true,
+    isLiveDirectory: extra.isLiveDirectory ?? true,
+    isLiveAvailability: extra.isLiveAvailability ?? true,
+    notes,
+  };
+}
+
+/**
  * GET /api/v1/blood-availability
- * Query: stateCode, districtCode, bloodGroup, component, hospitalCode
+ * Query: stateCode, districtCode, bloodGroup, component, hospitalCode, source ('internal' | 'external' | 'all')
  */
 availabilityRouter.get('/blood-availability', async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -56,6 +184,10 @@ availabilityRouter.get('/blood-availability', async (req: Request, res: Response
     const rawBloodGroup = req.query.bloodGroup ? String(req.query.bloodGroup).trim() : undefined;
     const rawComponent = req.query.component ? String(req.query.component).trim() : 'Packed Red Blood Cells';
     const hospitalCode = req.query.hospitalCode ? String(req.query.hospitalCode).trim() : undefined;
+    const requestedSource = (req.query.source ? String(req.query.source).toLowerCase().trim() : 'all') as
+      | 'internal'
+      | 'external'
+      | 'all';
 
     if (!districtCode || isNaN(districtCode)) {
       return res.status(400).json({
@@ -91,6 +223,7 @@ availabilityRouter.get('/blood-availability', async (req: Request, res: Response
         stateCode: true,
         districtCode: true,
         districtName: true,
+        updatedAt: true,
       },
       orderBy: { name: 'asc' },
     });
@@ -98,52 +231,90 @@ availabilityRouter.get('/blood-availability', async (req: Request, res: Response
     const mappedComponentType = mapComponentStringToType(rawComponent);
     const dbBloodGroupEnum = bloodGroupInfo?.dbEnum as any;
 
-    const participatingResults = await Promise.all(
-      participatingOrgs.map(async (org) => {
-        // Authoritative stock: clinically released, non-expired, unheld component units
-        const count = await prisma.componentUnit.count({
+    const orgIds = participatingOrgs.map((o) => o.id);
+    const stockStats = orgIds.length > 0
+      ? await prisma.componentUnit.groupBy({
+          by: ['organisationId'],
           where: {
-            organisationId: org.id,
+            organisationId: { in: orgIds },
             status: 'AVAILABLE',
             isHold: false,
             expiresAt: { gt: new Date() },
             ...(dbBloodGroupEnum ? { bloodGroup: dbBloodGroupEnum } : {}),
             ...(mappedComponentType ? { componentType: mappedComponentType as any } : {}),
           },
-        });
+          _count: { id: true },
+          _max: { updatedAt: true },
+        })
+      : [];
 
-        const validContact = normalizeContactPhone(org.phone);
-        const code = org.hospitalCode || org.orgCode;
+    const stockMap = new Map<string, { count: number; latestUpdate: Date | null }>();
+    for (const stat of (stockStats as any[])) {
+      stockMap.set(stat.organisationId, {
+        count: stat._count?.id ?? 0,
+        latestUpdate: stat._max?.updatedAt ?? null,
+      });
+    }
 
-        return {
-          bloodCentre: {
-            hospitalCode: code,
-            hospitalName: org.name,
-            address: org.address,
-            mobileNo: validContact,
-            hasValidContact: validContact !== null,
-            stateCode: org.stateCode,
-            districtCode: org.districtCode,
-            isParticipatingCentre: true,
-            orgCode: org.orgCode,
-          },
-          availability: {
-            status: count > 0 ? ('available' as const) : ('zero' as const),
-            rawStockString: `${count} Units`,
-            reportedQuantity: count,
-            quantityUnit: 'Units',
-            sourceEntryDate: new Date().toISOString(),
-            retrievedAt: new Date().toISOString(),
-            isStale: false,
-            source: 'RaktaSetu Participating Centre — Live Verified Inventory',
-          },
-        };
-      })
-    );
+    const participatingResults = participatingOrgs.map((org) => {
+      const stat = stockMap.get(org.id);
+      const count = stat?.count || 0;
+      const validContact = normalizeContactPhone(org.phone);
+      const code = org.hospitalCode || org.orgCode;
+      const sourceEntryDate = (stat?.latestUpdate || org.updatedAt || new Date()).toISOString();
+
+      return {
+        bloodCentre: {
+          hospitalCode: code,
+          hospitalName: org.name,
+          address: org.address,
+          mobileNo: validContact,
+          hasValidContact: validContact !== null,
+          stateCode: org.stateCode,
+          districtCode: org.districtCode,
+          isParticipatingCentre: true,
+          orgCode: org.orgCode,
+          sourceType: 'INTERNAL' as const,
+          sourceLabel: 'RaktaSetu Participating Centre',
+        },
+        availability: {
+          status: count > 0 ? ('available' as const) : ('zero' as const),
+          rawStockString: `${count} Units`,
+          reportedQuantity: count,
+          quantityUnit: 'Units',
+          sourceEntryDate,
+          retrievedAt: new Date().toISOString(),
+          isStale: false,
+          source: 'RaktaSetu Participating Centre — Live Verified Inventory',
+          sourceType: 'INTERNAL' as const,
+          sourceLabel: 'RaktaSetu Participating Centre',
+        },
+      };
+    });
 
     const participatingHospitalCodes = new Set(
-      participatingOrgs.map((o) => o.hospitalCode).filter(Boolean) as string[]
+      participatingOrgs.flatMap((o) => [o.hospitalCode, o.orgCode]).filter(Boolean) as string[]
     );
+
+    // If only internal participating centres were requested, return directly
+    if (requestedSource === 'internal') {
+      const verifiedDistrictInfo = VERIFIED_MAHARASHTRA_DISTRICTS[districtCode];
+      const sortedInternal = sortAvailabilityResults(participatingResults);
+      return res.json({
+        success: true,
+        data: sortedInternal,
+        meta: computeAvailabilityMeta(sortedInternal, {
+          selectedSource: 'internal',
+          participatingCount: participatingResults.length,
+          externalCount: 0,
+          stateCode,
+          districtCode,
+          districtName: verifiedDistrictInfo?.name || `District ${districtCode}`,
+          component: rawComponent,
+          bloodGroup: bloodGroupInfo?.display || rawBloodGroup || null,
+        }),
+      });
+    }
 
     // 1. Fetch live centres for the district from e-RaktKosh directory
     let centres: Array<{
@@ -269,6 +440,9 @@ availabilityRouter.get('/blood-availability', async (req: Request, res: Response
             hasValidContact: validContact !== null,
             stateCode: centre.stateCode,
             districtCode: centre.districtCode,
+            isParticipatingCentre: false,
+            sourceType: 'EXTERNAL' as const,
+            sourceLabel: 'e-RaktKosh Blood Bank',
           },
           availability: {
             status: liveData.status, // 'available' | 'no_data' | 'unknown' | 'stale'
@@ -279,6 +453,8 @@ availabilityRouter.get('/blood-availability', async (req: Request, res: Response
             retrievedAt: liveData.retrievedAt,
             isStale: liveData.isStale,
             source: 'e-RaktKosh Live Query',
+            sourceType: 'EXTERNAL' as const,
+            sourceLabel: 'e-RaktKosh Blood Bank',
           },
         };
       }
@@ -305,6 +481,9 @@ availabilityRouter.get('/blood-availability', async (req: Request, res: Response
             hasValidContact: validContact !== null,
             stateCode: centre.stateCode,
             districtCode: centre.districtCode,
+            isParticipatingCentre: false,
+            sourceType: 'EXTERNAL' as const,
+            sourceLabel: 'e-RaktKosh Blood Bank',
           },
           availability: {
             status,
@@ -315,6 +494,8 @@ availabilityRouter.get('/blood-availability', async (req: Request, res: Response
             retrievedAt: dbData.retrievedAt,
             isStale,
             source: 'RaktaSetu Snapshot Cache',
+            sourceType: 'EXTERNAL' as const,
+            sourceLabel: 'e-RaktKosh Blood Bank',
           },
         };
       }
@@ -329,6 +510,9 @@ availabilityRouter.get('/blood-availability', async (req: Request, res: Response
           hasValidContact: validContact !== null,
           stateCode: centre.stateCode,
           districtCode: centre.districtCode,
+          isParticipatingCentre: false,
+          sourceType: 'EXTERNAL' as const,
+          sourceLabel: 'e-RaktKosh Blood Bank',
         },
         availability: {
           status: isMappingVerified ? 'unknown' : 'unknown',
@@ -339,9 +523,34 @@ availabilityRouter.get('/blood-availability', async (req: Request, res: Response
           retrievedAt: new Date(),
           isStale: false,
           source: isMappingVerified ? 'e-RaktKosh Directory (Stock unverified online)' : 'Mapping Unverified',
+          sourceType: 'EXTERNAL' as const,
+          sourceLabel: 'e-RaktKosh Blood Bank',
         },
       };
     });
+
+    const verifiedDistrictInfo = VERIFIED_MAHARASHTRA_DISTRICTS[districtCode];
+
+    if (requestedSource === 'external') {
+      const sortedExternal = sortAvailabilityResults(results);
+      return res.json({
+        success: true,
+        data: sortedExternal,
+        meta: computeAvailabilityMeta(sortedExternal, {
+          selectedSource: 'external',
+          participatingCount: participatingResults.length,
+          externalCount: results.length,
+          stateCode,
+          districtCode,
+          districtName: verifiedDistrictInfo?.name || `District ${districtCode}`,
+          component: rawComponent,
+          bloodGroup: bloodGroupInfo?.display || rawBloodGroup || null,
+          isMappingVerified,
+          isLiveDirectory,
+          isLiveAvailability,
+        }),
+      });
+    }
 
     const combinedRaw = [...participatingResults, ...results];
     const seenHospitalCodes = new Set<string>();
@@ -354,32 +563,24 @@ availabilityRouter.get('/blood-availability', async (req: Request, res: Response
       combinedResults.push(item);
     }
 
-    const verifiedDistrictInfo = VERIFIED_MAHARASHTRA_DISTRICTS[districtCode];
+    const sortedCombined = sortAvailabilityResults(combinedResults);
 
     res.json({
       success: true,
-      data: combinedResults,
-      meta: {
-        totalCentres: combinedResults.length,
-        participatingCentresCount: participatingResults.length,
-        externalCentresCount: combinedResults.length - participatingResults.length,
+      data: sortedCombined,
+      meta: computeAvailabilityMeta(sortedCombined, {
+        selectedSource: 'all',
+        participatingCount: participatingResults.length,
+        externalCount: results.length,
         stateCode,
         districtCode,
         districtName: verifiedDistrictInfo?.name || `District ${districtCode}`,
         component: rawComponent,
         bloodGroup: bloodGroupInfo?.display || rawBloodGroup || null,
-        mappingVerified: isMappingVerified,
+        isMappingVerified,
         isLiveDirectory,
         isLiveAvailability,
-        notes:
-          participatingResults.length > 0
-            ? `${participatingResults.length} RaktaSetu participating centre(s) with live verified inventory, alongside ${results.length} e-RaktKosh directory listings.`
-            : isLiveAvailability
-            ? 'Live portal availability retrieved from e-RaktKosh. Units are not reserved online; always contact centre staff before travel.'
-            : isLiveDirectory
-            ? 'Live blood centres retrieved from e-RaktKosh directory. Direct telephone contact available for verified centres.'
-            : 'Directory retrieved from RaktaSetu cache. Direct contact available for verified centres.',
-      },
+      }),
     });
   } catch (error) {
     next(error);

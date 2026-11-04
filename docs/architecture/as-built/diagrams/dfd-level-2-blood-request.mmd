@@ -1,0 +1,57 @@
+flowchart TD
+    classDef procStyle fill:#1e40af,stroke:#1e3a8a,color:#ffffff;
+    classDef storeStyle fill:#475569,stroke:#334155,color:#ffffff;
+    classDef entStyle fill:#047857,stroke:#065f46,color:#ffffff;
+
+    Requester[Patient / Requester]:::entStyle
+    BloodBank[Designated Blood Bank Staff]:::entStyle
+    Admin[System Administrator]:::entStyle
+    Donor[Voluntary Donor]:::entStyle
+
+    D_Req[("D2: BloodRequest Store")]:::storeStyle
+    D_Inv[("D4: Component Inventory Store")]:::storeStyle
+    D_Donor[("D3: Donor Registry Store")]:::storeStyle
+    D_Order[("D5: Hospital Issue Orders Store")]:::storeStyle
+    D_Audit[("D6: Immutable Audit Logs")]:::storeStyle
+
+    P2_1(("2.1\nValidate & Persist\nCanonical Request")):::procStyle
+    P2_2(("2.2\nEvaluate Stock\n& Reserve Units")):::procStyle
+    P2_3(("2.3\nRegister Matching\nRequest for Shortfall")):::procStyle
+    P2_4(("2.4\nExecute Deterministic\nDonor Ranking")):::procStyle
+    P2_5(("2.5\nExplicit Candidate\nRelease Authorization")):::procStyle
+    P2_6(("2.6\nDeliver Candidates\n& Track Outreach")):::procStyle
+    P2_7(("2.7\nIssue Order &\nDual Handover Ack")):::procStyle
+
+    %% Detailed Level 2 Flow
+    Requester -->|"Submit Form (Units, Group, Bank)"| P2_1
+    P2_1 -->|"Save Canonical Request"| D_Req
+    P2_1 -->|"Notify Designated Bank"| BloodBank
+
+    BloodBank -->|"Open Request Review"| P2_2
+    P2_2 <-->|"Check Available & Released Stock"| D_Inv
+    P2_2 -->|"Allocate Units (UnitsAllocated)"| D_Req
+    P2_2 -->|"Calculate Remaining Shortfall"| BloodBank
+
+    BloodBank -->|"Request Matching (Shortfall > 0)"| P2_3
+    P2_3 -->|"Save mr_id, status: REQUESTED"| D_Req
+
+    Admin -->|"Trigger Matching Algorithm"| P2_4
+    P2_4 <-->|"Filter Compatible & Available Donors"| D_Donor
+    P2_4 -->|"Save Ranked Candidates Pool"| D_Req
+
+    Admin -->|"Select Candidates & Click Release"| P2_5
+    P2_5 -->|"Save status: RELEASED, Audit Event"| D_Req
+    P2_5 -->|"Write Release Audit Entry"| D_Audit
+
+    BloodBank -->|"Fetch Candidate Pool"| P2_6
+    P2_6 <-->|"Read Masked Donor Records"| D_Req
+    P2_6 -->|"Send Invitation"| Donor
+    Donor -->|"Accept / Decline"| P2_6
+    P2_6 -->|"Update Invitation Status"| D_Req
+
+    BloodBank -->|"Dispatch Handover"| P2_7
+    P2_7 -->|"Update Component to ISSUED"| D_Inv
+    P2_7 -->|"Record Issue Order"| D_Order
+    Requester -->|"Patient Acknowledge Receipt"| P2_7
+    P2_7 -->|"Set Request Status: CLOSED"| D_Req
+

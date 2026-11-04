@@ -11,6 +11,8 @@ import {
   TransitionRequestInput,
   PatientRequestStatus,
 } from '../services/patientRequestCoordination';
+import { BloodRequestCoordinationService } from '../services/bloodRequestCoordination';
+import { parseRequestMessageMetadata } from '../services/hospitalIntegration';
 
 export const patientSearchRouter = Router();
 
@@ -95,25 +97,31 @@ patientSearchRouter.post(
   requireAuth,
   async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
-      const input: CreatePatientRequestInput = {
+      const result = await BloodRequestCoordinationService.createCanonicalRequest(req.user.id, {
         patientName: req.body.patientName,
         bloodGroup: req.body.bloodGroup,
-        componentType: req.body.componentType,
         component: req.body.component || req.body.componentType || 'Whole Blood',
-        unitsRequested: parseInt(req.body.unitsRequested, 10),
+        unitsRequested: req.body.unitsRequested,
         requiredBy: req.body.requiredBy,
-        organisationId: req.body.organisationId,
-        hospitalCode: req.body.hospitalCode,
-        message: req.body.message,
+        hospitalCode: req.body.hospitalCode || req.body.organisationId,
+        admittedHospitalName: req.body.admittedHospitalName || req.body.hospitalName,
+        receivingFacilityId: req.body.receivingFacilityId,
         urgency: req.body.urgency || 'ROUTINE',
-      };
+        searchScope: req.body.searchScope,
+        message: req.body.message,
+        requesterContact: req.body.requesterContact || req.user.phoneNumber,
+        requesterConsent: req.body.requesterConsent,
+      });
 
-      const result = await PatientRequestService.createRequest(req.user.id, input);
-
-      return res.status(201).json({
+      return res.status(result.isDuplicateSuppressed ? 200 : 201).json({
         success: true,
-        message: 'Patient request submitted successfully. State: SUBMITTED.',
-        data: result,
+        message: result.isDuplicateSuppressed
+          ? 'Recent request submission recovered.'
+          : 'Patient request submitted successfully. State: SUBMITTED.',
+        data: {
+          ...result,
+          lifecycleStatus: result.closureOutcome || 'SUBMITTED',
+        },
       });
     } catch (error: any) {
       return res.status(400).json({
@@ -154,20 +162,32 @@ patientSearchRouter.get(
         },
       });
 
-      const formatted = requests.map((r: any) => ({
-        id: r.id,
-        patientName: r.patientName,
-        bloodGroup: r.bloodGroup,
-        component: r.component,
-        unitsRequested: r.unitsRequested,
-        requiredBy: r.requiredBy,
-        hospitalCode: r.hospitalCode,
-        bloodCentre: r.bloodCentre,
-        status: r.status,
-        lifecycleStatus: (r.reportedDonationStatus as PatientRequestStatus) || 'SUBMITTED',
-        createdAt: r.createdAt,
-        updatedAt: r.updatedAt,
-      }));
+      const formatted = requests.map((r: any) => {
+        const meta = parseRequestMessageMetadata(r.message, r.bloodCentre?.hospitalName);
+        const lifecycleStage = r.closureOutcome || r.reportedDonationStatus || (r.status === 'CLOSED' ? 'FULFILLED' : r.status);
+        return {
+          id: r.id,
+          requestReference: `#${r.id.slice(0, 8)}`,
+          patientName: r.patientName,
+          admittedHospitalName: meta.hospitalName || r.bloodCentre?.hospitalName || 'Local Medical Centre',
+          bloodGroup: r.bloodGroup,
+          component: r.component,
+          unitsRequested: r.unitsRequested,
+          requiredBy: r.requiredBy,
+          hospitalCode: r.hospitalCode,
+          bloodCentre: r.bloodCentre,
+          assignedBankId: meta.assignedBankId || null,
+          assignedBankName: meta.assignedBankName || null,
+          transportDetails: meta.transportDetails || null,
+          canConfirmReceipt: lifecycleStage === 'DISPATCHED' && !meta.patientAcknowledgedAt,
+          urgency: meta.urgency || 'ROUTINE',
+          status: r.status,
+          lifecycleStatus: lifecycleStage,
+          patientAcknowledgedAt: meta.patientAcknowledgedAt || null,
+          createdAt: r.createdAt,
+          updatedAt: r.updatedAt,
+        };
+      });
 
       return res.json({
         success: true,

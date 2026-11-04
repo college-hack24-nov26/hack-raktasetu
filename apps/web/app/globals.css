@@ -159,3 +159,26 @@ a, button {
   background-color: #ffffff !important;
   overflow: hidden;
 }
+
+/* Live Donor Geospatial Pulse Animation */
+@keyframes donor-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.6), 0 2px 8px rgba(0, 0, 0, 0.3);
+  }
+  70% {
+    box-shadow: 0 0 0 12px rgba(220, 38, 38, 0), 0 2px 8px rgba(0, 0, 0, 0.3);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(220, 38, 38, 0), 0 2px 8px rgba(0, 0, 0, 0.3);
+  }
+}
+
+.live-pulse {
+  animation: donor-pulse 2s infinite ease-out;
+}
+
+.marker-stale {
+  opacity: 0.85;
+  filter: saturate(0.8);
+}
+

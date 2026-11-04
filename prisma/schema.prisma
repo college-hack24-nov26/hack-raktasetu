@@ -102,6 +102,8 @@ model User {
   campStaffAssignments     CampStaffAssignment[]
   createdCamps          Camp[]                  @relation("CreatedCamps")
   approvedCamps         Camp[]                  @relation("ApprovedCamps")
+  donorLocationSessions DonorLocationSession[]  @relation("DonorLocationSessions")
+  donorLatestLocation   DonorLatestLocation?    @relation("DonorLatestLocation")
 
   @@index([phoneNumber])
   @@index([role, status])
@@ -385,6 +387,14 @@ model Organisation {
   hospitalCode  String?
   bloodCentre   BloodCentre? @relation(fields: [hospitalCode], references: [hospitalCode], onDelete: SetNull)
 
+  // Confirmed GPS location and donor proximity configuration
+  latitude            Float?
+  longitude           Float?
+  locationStatus      String    @default("UNCONFIGURED") // "UNCONFIGURED" | "CONFIRMED" | "UNVERIFIED"
+  locationConfirmedAt DateTime?
+  locationConfirmedBy String?   // User ID or Staff ID who confirmed coordinates
+  locationAddress     String?   // Verified facility entrance / donor reception address
+
   verifiedAt    DateTime?
   verifiedBy    String?     // Admin user identifier who verified the organisation
 
@@ -411,6 +421,7 @@ model Organisation {
   @@index([stateCode, districtCode])
   @@index([licenseNumber])
   @@index([status])
+  @@index([locationStatus])
   @@map("organisations")
 }
 
@@ -454,6 +465,9 @@ model OrganisationApplication {
   email           String
   phone           String
   componentTypes  String[]          // e.g. ["PRBC", "Whole Blood", "Platelets"]
+  latitude        Float?            // Optional proposed location during registration
+  longitude       Float?
+  locationAddress String?
   status          ApplicationStatus @default(SUBMITTED)
   reviewNotes     String?
   reviewedBy      String?           // Reviewer admin user identifier
@@ -1381,6 +1395,68 @@ model ComponentDispositionRecord {
   @@index([componentUnitId])
   @@index([organisationId, dispositionType])
   @@map("component_disposition_records")
+}
+
+// ----------------------------------------------------
+// Phase 10: Donor Live-Location Tracking & Consent Governance
+// ----------------------------------------------------
+
+enum LocationSessionStatus {
+  ACTIVE
+  STOPPED
+  REVOKED
+  EXPIRED
+}
+
+model DonorLocationSession {
+  id                 String                @id @default(uuid())
+  donorUserId        String
+  donorUser          User                  @relation("DonorLocationSessions", fields: [donorUserId], references: [id], onDelete: Cascade)
+  status             LocationSessionStatus @default(ACTIVE)
+
+  // Explicit Consent Governance (No database default that grants consent)
+  consentGranted     Boolean
+  consentVersion     String
+  consentGrantedAt   DateTime
+
+  startedAt          DateTime              @default(now())
+  endedAt            DateTime?
+  endedReason        String?               // "DONOR_STOPPED" | "DONOR_REVOKED" | "SUPERSEDED" | "EXPIRED"
+
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  latestLocation     DonorLatestLocation?
+
+  @@index([donorUserId, status])
+  @@index([status, startedAt])
+  @@map("donor_location_sessions")
+}
+
+model DonorLatestLocation {
+  id                 String               @id @default(uuid())
+  donorUserId        String               @unique // Strictly one latest location per donor; route history forbidden
+  donorUser          User                 @relation("DonorLatestLocation", fields: [donorUserId], references: [id], onDelete: Cascade)
+  sessionId          String               @unique // 1:1 with current session
+  session            DonorLocationSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  latitude           Float
+  longitude          Float
+  accuracy           Float                // Accuracy radius in meters
+  heading            Float?               // Optional device heading in degrees
+  speed              Float?               // Optional device speed in m/s
+  batteryLevel       Float?               // Optional device battery (0.0 to 1.0 or percentage)
+
+  deviceTimestamp    DateTime
+  serverReceivedAt   DateTime             @default(now())
+  isStale            Boolean              @default(false)
+
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+
+  @@index([serverReceivedAt])
+  @@index([sessionId])
+  @@map("donor_latest_locations")
 }
 
 

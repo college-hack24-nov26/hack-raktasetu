@@ -84,6 +84,7 @@ interface AttendanceItem {
     deferralCategory?: string | null;
     deferralDurationDays?: number | null;
     clinicalNotes?: string | null;
+    createdAt?: string | null;
   } | null;
   donationEvent?: {
     id: string;
@@ -92,6 +93,7 @@ interface AttendanceItem {
     volumeMl?: number | null;
     adverseReaction: boolean;
     performedAt: string;
+    notes?: string | null;
     collectionUnit?: {
       id: string;
       unitNumber: string;
@@ -340,14 +342,43 @@ function CampDashboardContent() {
     }
   }, []);
 
+  // Donor Registration Queues state (Workflow Restructure)
+  const [clinicalQueue, setClinicalQueue] = useState<any[]>([]);
+  const [collectionQueue, setCollectionQueue] = useState<any[]>([]);
+  const [loadingQueues, setLoadingQueues] = useState(false);
+
+  const loadRegistrationQueues = useCallback(async (campId: string) => {
+    if (!campId || campId === 'undefined' || campId === 'null') return;
+    try {
+      setLoadingQueues(true);
+      const [clinRes, colRes] = await Promise.all([
+        authFetch(`/api/v1/donor-registration/queue?campId=${encodeURIComponent(campId)}&stage=clinical`),
+        authFetch(`/api/v1/donor-registration/queue?campId=${encodeURIComponent(campId)}&stage=collection`),
+      ]);
+      if (clinRes.ok) {
+        const data = await clinRes.json();
+        setClinicalQueue(data.data?.items || data.data?.registrations || []);
+      }
+      if (colRes.ok) {
+        const data = await colRes.json();
+        setCollectionQueue(data.data?.items || data.data?.registrations || []);
+      }
+    } catch (err) {
+      console.warn('Failed to load donor registration queues:', err);
+    } finally {
+      setLoadingQueues(false);
+    }
+  }, []);
+
   const loadCampData = useCallback(async (campId: string) => {
+    if (!campId || campId === 'undefined' || campId === 'null') return;
     try {
       setLoadingRoster(true);
       setError(null);
 
       const [campRes, rosterRes] = await Promise.all([
-        authFetch(`/api/v1/camps/${campId}`),
-        authFetch(`/api/v1/camps/${campId}/attendance`).catch(() => null),
+        authFetch(`/api/v1/camps/${encodeURIComponent(campId)}`),
+        authFetch(`/api/v1/camps/${encodeURIComponent(campId)}/attendance`).catch(() => null),
       ]);
 
       if (!campRes.ok) {
@@ -365,19 +396,22 @@ function CampDashboardContent() {
       if (rosterRes && rosterRes.ok) {
         const rosterData = await rosterRes.json();
         setRoster(rosterData.data || []);
+      } else if (rosterRes && !rosterRes.ok) {
+        console.warn(`Roster response for camp ${campId} returned status ${rosterRes.status}`);
       }
 
       await Promise.all([
         loadStaffList(campId),
         loadHandoverData(campId),
         loadClosureReadiness(campId),
+        loadRegistrationQueues(campId),
       ]);
     } catch (err: any) {
       setError(err.message || 'Error loading camp workspace');
     } finally {
       setLoadingRoster(false);
     }
-  }, [loadStaffList, loadHandoverData, loadClosureReadiness]);
+  }, [loadStaffList, loadHandoverData, loadClosureReadiness, loadRegistrationQueues]);
 
   const [refreshingCamp, setRefreshingCamp] = useState(false);
   const handleRefreshCamp = async () => {
@@ -409,6 +443,16 @@ function CampDashboardContent() {
       }
     },
   });
+
+  // Periodic background sync fallback (15s) ensuring real-time integrity even if WebSocket packet is dropped
+  useEffect(() => {
+    if (!currentCamp?.id) return;
+    const interval = setInterval(() => {
+      loadRegistrationQueues(currentCamp.id);
+      loadCampData(currentCamp.id);
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [currentCamp?.id, loadRegistrationQueues, loadCampData]);
 
   // Initialize session and assignments
   useEffect(() => {
@@ -752,6 +796,14 @@ function CampDashboardContent() {
   const handleConfirmUnit = async (donationEventId: string) => {
     setError(null);
     setActionSuccess(null);
+
+    // Validate donation event outcome before dispatching request
+    const matchedAttendee = roster.find((r) => r.donationEvent?.id === donationEventId);
+    if (matchedAttendee?.donationEvent && matchedAttendee.donationEvent.outcome !== 'COMPLETED') {
+      setError(`Cannot confirm bag: Donation outcome is "${matchedAttendee.donationEvent.outcome}". Only COMPLETED donations produce physical units.`);
+      return;
+    }
+
     setConfirmingUnitId(donationEventId);
 
     try {
@@ -759,7 +811,7 @@ function CampDashboardContent() {
         method: 'POST',
         body: JSON.stringify({
           donationEventId,
-          volumeMl: 450,
+          volumeMl: matchedAttendee?.donationEvent?.volumeMl || 450,
           notes: 'Standard collection unit confirmed on camp site',
         }),
       });
@@ -859,15 +911,15 @@ function CampDashboardContent() {
   // Permissions helpers
   const isCampClosed = currentCamp?.status === 'COMPLETED' || currentCamp?.status === 'CANCELLED';
   const isCampApproved = currentCamp?.status === 'APPROVED' && !isCampClosed;
-  const canManageTeam = (currentRole === 'CAMP_ADMIN') && isCampApproved;
-  const canVerifyReadiness = (currentRole === 'CAMP_ADMIN' || currentRole === 'CAMP_COORDINATOR' || currentRole === 'COLLECTION_STAFF') && isCampApproved;
-  const canRegisterWalkin = (currentRole === 'CAMP_ADMIN' || currentRole === 'CAMP_COORDINATOR' || currentRole === 'COLLECTION_STAFF') && isCampApproved;
+  const canManageTeam = (currentRole === 'CAMP_ADMIN' || currentRole === 'ORG_ADMIN') && isCampApproved;
+  const canVerifyReadiness = (['CAMP_ADMIN', 'ORG_ADMIN', 'CAMP_COORDINATOR', 'COLLECTION_STAFF'].includes(currentRole)) && isCampApproved;
+  const canRegisterWalkin = (['CAMP_ADMIN', 'ORG_ADMIN', 'CAMP_COORDINATOR', 'COLLECTION_STAFF'].includes(currentRole)) && isCampApproved;
   const canScreenDonors = currentRole === 'CLINICAL_STAFF' && isCampApproved;
-  const canRecordDonations = currentRole === 'COLLECTION_STAFF' && isCampApproved;
-  const canConfirmUnits = currentRole === 'COLLECTION_STAFF' && isCampApproved;
-  const canSubmitHandover = (currentRole === 'CAMP_ADMIN' || currentRole === 'COLLECTION_STAFF') && isCampApproved;
-  const canViewReports = (currentRole === 'CAMP_ADMIN' || currentRole === 'COLLECTION_STAFF');
-  const canCloseCamp = (currentRole === 'CAMP_ADMIN') && !isCampClosed;
+  const canRecordDonations = (currentRole === 'COLLECTION_STAFF' || currentRole === 'ORG_ADMIN') && isCampApproved;
+  const canConfirmUnits = (currentRole === 'COLLECTION_STAFF' || currentRole === 'ORG_ADMIN') && isCampApproved;
+  const canSubmitHandover = (currentRole === 'CAMP_ADMIN' || currentRole === 'ORG_ADMIN') && isCampApproved;
+  const canViewReports = ['CAMP_ADMIN', 'ORG_ADMIN', 'CAMP_COORDINATOR', 'CLINICAL_STAFF', 'COLLECTION_STAFF'].includes(currentRole);
+  const canCloseCamp = (currentRole === 'CAMP_ADMIN' || currentRole === 'ORG_ADMIN') && !isCampClosed;
 
   // Filtered & sorted attendance roster
   const filteredRoster = useMemo(() => {
@@ -1006,12 +1058,28 @@ function CampDashboardContent() {
           badge: 'Donation Completed',
           badgeColor: 'bg-red-100 text-red-800',
         });
+      } else if (item.donationEvent?.outcome === 'ADVERSE_EVENT_STOPPED' || item.donationEvent?.adverseReaction) {
+        events.push({
+          id: `dn-adv-${item.id}`,
+          time: new Date(item.donationEvent.performedAt),
+          text: `${item.donorName} collection stopped due to adverse reaction (${item.donationEvent.volumeMl || 0} mL)`,
+          badge: 'Adverse Reaction',
+          badgeColor: 'bg-rose-100 text-rose-800',
+        });
+      } else if (item.donationEvent && (item.donationEvent.outcome === 'DEFERRED' || item.donationEvent.outcome === 'NOT_PERFORMED')) {
+        events.push({
+          id: `dn-inc-${item.id}`,
+          time: new Date(item.donationEvent.performedAt),
+          text: `${item.donorName} collection incomplete (${item.donationEvent.volumeMl || 0} mL)`,
+          badge: 'Incomplete Collection',
+          badgeColor: 'bg-amber-100 text-amber-800',
+        });
       }
 
       if (item.screening?.status === 'CLEARED') {
         events.push({
           id: `sc-${item.id}`,
-          time: new Date(item.checkedInAt || item.registeredAt),
+          time: new Date(item.screening.createdAt || item.checkedInAt || item.registeredAt),
           text: `${item.donorName} cleared clinical screening`,
           badge: 'Screening Cleared',
           badgeColor: 'bg-purple-100 text-purple-800',
@@ -1019,7 +1087,7 @@ function CampDashboardContent() {
       } else if (item.screening?.status === 'DEFERRED') {
         events.push({
           id: `sc-def-${item.id}`,
-          time: new Date(item.checkedInAt || item.registeredAt),
+          time: new Date(item.screening.createdAt || item.checkedInAt || item.registeredAt),
           text: `${item.donorName} clinically deferred (${item.screening.deferralCategory || 'Clinical criteria'})`,
           badge: 'Deferred',
           badgeColor: 'bg-amber-100 text-amber-800',
@@ -1034,10 +1102,18 @@ function CampDashboardContent() {
           badge: 'Checked In',
           badgeColor: 'bg-blue-100 text-blue-800',
         });
+      } else if (item.registeredAt) {
+        events.push({
+          id: `reg-${item.id}`,
+          time: new Date(item.registeredAt),
+          text: `${item.donorName} registered for donation`,
+          badge: 'Registered',
+          badgeColor: 'bg-slate-100 text-slate-800',
+        });
       }
     }
 
-    return events.sort((a, b) => b.time.getTime() - a.time.getTime()).slice(0, 5);
+    return events.sort((a, b) => b.time.getTime() - a.time.getTime()).slice(0, 8);
   }, [roster]);
 
   // Active blood groups for compact summary on Overview
@@ -1061,9 +1137,9 @@ function CampDashboardContent() {
   const navItems: { id: CampNavPage; label: string; icon: React.ComponentType<{ size?: number; className?: string }>; count?: number; restricted?: boolean }[] = [
     { id: 'overview', label: 'Overview', icon: IconDashboard },
     { id: 'donors', label: 'Donors & Attendance', icon: IconStaff, count: roster.length },
-    { id: 'screening', label: 'Clinical Screening', icon: IconScreening, count: roster.filter((r) => r.status === 'CHECKED_IN' && !r.screening).length, restricted: currentRole !== 'CLINICAL_STAFF' && currentRole !== 'CAMP_ADMIN' },
-    { id: 'collection', label: 'Collection & Units', icon: IconCollection, count: analytics?.units?.confirmed ?? 0 },
-    { id: 'handover', label: 'Handover & Custody', icon: IconHandover, count: analytics?.units?.awaitingDispatch ?? 0 },
+    { id: 'screening', label: 'Clinical Screening', icon: IconScreening, count: roster.filter((r) => r.status === 'CHECKED_IN' && !r.screening).length, restricted: currentRole !== 'CLINICAL_STAFF' && currentRole !== 'CAMP_ADMIN' && currentRole !== 'ORG_ADMIN' },
+    { id: 'collection', label: 'Collection & Units', icon: IconCollection, count: analytics?.units?.confirmed ?? 0, restricted: currentRole === 'CLINICAL_STAFF' },
+    { id: 'handover', label: 'Handover & Custody', icon: IconHandover, count: analytics?.units?.awaitingDispatch ?? 0, restricted: currentRole === 'CLINICAL_STAFF' },
     { id: 'reports', label: 'Reports & Analytics', icon: IconReports, restricted: !canViewReports },
     { id: 'team', label: 'Camp Team', icon: IconStaff, count: staffList.length },
     { id: 'settings', label: 'Camp Settings', icon: IconSettings },
@@ -1230,16 +1306,26 @@ function CampDashboardContent() {
             </button>
 
             {canRegisterWalkin && (
-              <button
-                onClick={() => {
-                  setActivePage('donors');
-                  setShowWalkinCard(true);
-                }}
-                className="px-3 py-1.5 bg-[#B91C32] hover:bg-[#9B1324] text-white text-xs font-bold rounded-xl transition-all shadow-xs cursor-pointer flex items-center gap-1"
-              >
-                <span>+</span>
-                <span className="hidden sm:inline">Register Donor</span>
-              </button>
+              <div className="flex items-center gap-1.5">
+                <Link
+                  href={`/camp/donor-registration?campId=${currentCamp?.id || ''}`}
+                  className="px-3 py-1.5 bg-[#B91C32] hover:bg-[#9B1324] text-white text-xs font-bold rounded-xl transition-all shadow-xs cursor-pointer flex items-center gap-1"
+                >
+                  <span>+</span>
+                  <span className="hidden sm:inline">Register Donor (Wizard)</span>
+                </Link>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActivePage('donors');
+                    setShowWalkinCard(true);
+                  }}
+                  className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all cursor-pointer flex items-center gap-1"
+                  title="Quick Attendance Check-in"
+                >
+                  <span className="hidden md:inline">Quick Check-in</span>
+                </button>
+              </div>
             )}
 
             <button
@@ -2094,6 +2180,154 @@ function CampDashboardContent() {
                   </table>
                 </div>
               </div>
+
+              {/* Universal Donor Registration Clinical Intake Queue */}
+              <div className="bg-white rounded-2xl border border-indigo-200 shadow-xs overflow-hidden">
+                <div className="p-4 border-b border-indigo-100 bg-indigo-50/60 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-extrabold text-indigo-900">📋 Camp Donor Registration Clinical Intake Queue</span>
+                  </div>
+                  <span className="text-xs font-bold text-indigo-800">
+                    {clinicalQueue.length} awaiting clinical evaluation
+                  </span>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+                        <th className="py-2.5 px-4">Donor Name &amp; Reg #</th>
+                        <th className="py-2.5 px-4">Camp &amp; Organisation</th>
+                        <th className="py-2.5 px-4 text-center">Registration Time</th>
+                        <th className="py-2.5 px-4 text-center">Counselling Status</th>
+                        <th className="py-2.5 px-4 text-center">Current Status</th>
+                        <th className="py-2.5 px-4 text-center">Outstanding Actions</th>
+                        <th className="py-2.5 px-4 text-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 font-medium">
+                      {clinicalQueue.length === 0 ? (
+                        <tr>
+                          <td colSpan={7} className="py-6 text-center text-xs text-slate-500">
+                            No donor registrations awaiting clinical evaluation.
+                          </td>
+                        </tr>
+                      ) : (
+                        clinicalQueue.map((item) => (
+                          <tr key={item.id} className="hover:bg-slate-50/60">
+                            <td className="py-3 px-4">
+                              <span className="font-bold text-slate-900 block">{item.fullName}</span>
+                              <span className="text-[11px] font-mono text-slate-500">{item.registrationNumber}</span>
+                            </td>
+                            <td className="py-3 px-4">
+                              <span className="text-slate-800 font-semibold block truncate max-w-[160px]">{item.campTitle || currentCamp?.title || 'Assigned Camp'}</span>
+                              <span className="text-[10px] text-slate-500 block truncate max-w-[160px]">{item.organisationName || 'Authorised Blood Centre'}</span>
+                            </td>
+                            <td className="py-3 px-4 text-center font-mono text-slate-600">
+                              {item.createdAt ? new Date(item.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}
+                            </td>
+                            <td className="py-3 px-4 text-center">
+                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                item.counsellingStatus === 'APPROVED' ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-600'
+                              }`}>
+                                {item.counsellingStatus || 'UNANSWERED'}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-center">
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800">
+                                {item.workflowStatus}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-center text-slate-600 text-[11px]">
+                              {item.workflowStatus === 'COUNSELLING_PENDING'
+                                ? 'Counselling Assessment'
+                                : 'Screening & Medical Clearance'}
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              <Link
+                                href={`/camp/donor-registration?id=${item.id}&campId=${currentCamp?.id}&step=${item.counsellingStatus === 'APPROVED' || item.workflowStatus === 'SCREENING_PENDING' || item.workflowStatus === 'MEDICAL_REVIEW_PENDING' ? 3 : 2}`}
+                                className="inline-block px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold cursor-pointer transition-colors shadow-xs"
+                              >
+                                Evaluate →
+                              </Link>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Clinically Cleared Donors — Ready for Collection Queue */}
+              <div className="bg-white rounded-2xl border border-emerald-200 shadow-xs overflow-hidden">
+                <div className="p-4 border-b border-emerald-100 bg-emerald-50/60 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-extrabold text-emerald-950">✓ Clinically Cleared Donors — Ready for Collection</span>
+                    <span className="text-[10px] font-bold px-2 py-0.5 bg-emerald-200 text-emerald-900 rounded-full">
+                      Medical Clearance Passed
+                    </span>
+                  </div>
+                  <span className="text-xs font-bold text-emerald-800">
+                    {collectionQueue.filter((i) => i.workflowStatus === 'CLEARED_FOR_COLLECTION' || i.medicalDecision === 'FIT').length} cleared for collection
+                  </span>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+                        <th className="py-2.5 px-4">Donor Name</th>
+                        <th className="py-2.5 px-4 text-center">Blood Group</th>
+                        <th className="py-2.5 px-4 text-center">Screening Decision</th>
+                        <th className="py-2.5 px-4 text-center">Current Status</th>
+                        <th className="py-2.5 px-4 text-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 font-medium">
+                      {collectionQueue.filter((i) => i.workflowStatus === 'CLEARED_FOR_COLLECTION' || i.medicalDecision === 'FIT').length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="py-6 text-center text-xs text-slate-500">
+                            No registered donors currently cleared and waiting for collection.
+                          </td>
+                        </tr>
+                      ) : (
+                        collectionQueue
+                          .filter((i) => i.workflowStatus === 'CLEARED_FOR_COLLECTION' || i.medicalDecision === 'FIT')
+                          .map((item) => (
+                            <tr key={item.id} className="hover:bg-slate-50/60">
+                              <td className="py-3 px-4">
+                                <span className="font-bold text-slate-900 block">{item.fullName}</span>
+                                <span className="text-[11px] font-mono text-slate-500">{item.registrationNumber}</span>
+                              </td>
+                              <td className="py-3 px-4 text-center font-bold">
+                                {item.bloodGroup || '—'}
+                              </td>
+                              <td className="py-3 px-4 text-center">
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                                  ✓ FIT
+                                </span>
+                              </td>
+                              <td className="py-3 px-4 text-center">
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700">
+                                  {item.workflowStatus}
+                                </span>
+                              </td>
+                              <td className="py-3 px-4 text-right">
+                                <Link
+                                  href={`/camp/donor-registration?id=${item.id}&campId=${currentCamp?.id}&step=4`}
+                                  className="inline-block px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-bold cursor-pointer transition-colors shadow-xs"
+                                >
+                                  Record Donation →
+                                </Link>
+                              </td>
+                            </tr>
+                          ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
           )}
 
@@ -2114,12 +2348,81 @@ function CampDashboardContent() {
                 )}
               </div>
 
+              {/* Universal Donor Registration Phlebotomy Collection Queue */}
+              <div className="bg-white rounded-2xl border border-rose-200 shadow-xs overflow-hidden">
+                <div className="p-4 border-b border-rose-100 bg-rose-50/60 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-extrabold text-rose-950">🩸 Cleared Donors Phlebotomy Queue</span>
+                    <span className="text-[10px] font-bold px-2 py-0.5 bg-rose-200 text-rose-950 rounded-full">
+                      Medical Clearance Verified
+                    </span>
+                  </div>
+                  <span className="text-xs font-bold text-rose-900">
+                    {collectionQueue.length} cleared for collection
+                  </span>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+                        <th className="py-2.5 px-4">Reg #</th>
+                        <th className="py-2.5 px-4">Donor Name</th>
+                        <th className="py-2.5 px-4">Mobile</th>
+                        <th className="py-2.5 px-4 text-center">Group</th>
+                        <th className="py-2.5 px-4 text-center">Medical Clearance</th>
+                        <th className="py-2.5 px-4 text-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 font-medium">
+                      {collectionQueue.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="py-6 text-center text-xs text-slate-500">
+                            No registered donors cleared and waiting for phlebotomy.
+                          </td>
+                        </tr>
+                      ) : (
+                        collectionQueue.map((item) => (
+                          <tr key={item.id} className="hover:bg-slate-50/60">
+                            <td className="py-3 px-4 font-mono font-bold text-slate-900">
+                              {item.registrationNumber}
+                            </td>
+                            <td className="py-3 px-4 font-bold text-slate-900">
+                              {item.fullName}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-slate-600">
+                              {item.primaryMobile}
+                            </td>
+                            <td className="py-3 px-4 text-center font-bold">
+                              {item.bloodGroup || '—'}
+                            </td>
+                            <td className="py-3 px-4 text-center">
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                                FIT (MO Cleared)
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              <Link
+                                href={`/camp/donor-registration?id=${item.id}&campId=${currentCamp?.id}&step=4`}
+                                className="inline-block px-3 py-1 bg-[#B91C32] hover:bg-[#9B1324] text-white rounded-lg text-[10px] font-bold cursor-pointer"
+                              >
+                                Record Donation →
+                              </Link>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
               {/* Cleared Donors ready for Phlebotomy */}
               <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
                 <div className="p-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
                   <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700">Clinically Cleared Donors Ready for Collection</h3>
                   <span className="text-xs font-bold text-red-700">
-                    {roster.filter((r) => r.screening?.status === 'CLEARED' && !r.donationEvent).length} pending
+                    {roster.filter((r) => r.screening?.status === 'CLEARED' && (!r.donationEvent || r.donationEvent.outcome === 'NOT_PERFORMED')).length} pending
                   </span>
                 </div>
 
@@ -2135,7 +2438,7 @@ function CampDashboardContent() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 font-medium">
-                      {roster.filter((r) => r.screening?.status === 'CLEARED' && !r.donationEvent).length === 0 ? (
+                      {roster.filter((r) => r.screening?.status === 'CLEARED' && (!r.donationEvent || r.donationEvent.outcome === 'NOT_PERFORMED')).length === 0 ? (
                         <tr>
                           <td colSpan={5} className="py-8 text-center text-xs text-slate-500">
                             No cleared donors awaiting phlebotomy. Donors must be clinically cleared first.
@@ -2143,29 +2446,34 @@ function CampDashboardContent() {
                         </tr>
                       ) : (
                         roster
-                          .filter((r) => r.screening?.status === 'CLEARED' && !r.donationEvent)
-                          .map((item) => (
-                            <tr key={item.id} className="hover:bg-slate-50/60">
-                              <td className="py-3 px-4 font-bold text-slate-900">{item.donorName}</td>
-                              <td className="py-3 px-4 text-center font-bold">{item.bloodGroup || '—'}</td>
-                              <td className="py-3 px-4 text-center text-purple-700 font-semibold">{item.screening?.eligibilityDecision}</td>
-                              <td className="py-3 px-4 text-center">
-                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800">
-                                  Awaiting Phlebotomy
-                                </span>
-                              </td>
-                              <td className="py-3 px-4 text-right">
-                                {canRecordDonations && (
-                                  <button
-                                    onClick={() => setDonationAttendee(item)}
-                                    className="px-2.5 py-1 bg-[#B91C32] hover:bg-[#9B1324] text-white rounded-lg text-[10px] font-bold cursor-pointer"
-                                  >
-                                    Record Donation →
-                                  </button>
-                                )}
-                              </td>
-                            </tr>
-                          ))
+                          .filter((r) => r.screening?.status === 'CLEARED' && (!r.donationEvent || r.donationEvent.outcome === 'NOT_PERFORMED'))
+                          .map((item) => {
+                            const isNotPerformed = item.donationEvent?.outcome === 'NOT_PERFORMED';
+                            return (
+                              <tr key={item.id} className="hover:bg-slate-50/60">
+                                <td className="py-3 px-4 font-bold text-slate-900">{item.donorName}</td>
+                                <td className="py-3 px-4 text-center font-bold">{item.bloodGroup || '—'}</td>
+                                <td className="py-3 px-4 text-center text-purple-700 font-semibold">{item.screening?.eligibilityDecision}</td>
+                                <td className="py-3 px-4 text-center">
+                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                    isNotPerformed ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-800'
+                                  }`}>
+                                    {isNotPerformed ? 'Phlebotomy Not Performed' : 'Awaiting Phlebotomy'}
+                                  </span>
+                                </td>
+                                <td className="py-3 px-4 text-right">
+                                  {canRecordDonations && (
+                                    <button
+                                      onClick={() => setDonationAttendee(item)}
+                                      className="px-2.5 py-1 bg-[#B91C32] hover:bg-[#9B1324] text-white rounded-lg text-[10px] font-bold cursor-pointer"
+                                    >
+                                      {isNotPerformed ? 'Record Phlebotomy →' : 'Record Donation →'}
+                                    </button>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })
                       )}
                     </tbody>
                   </table>
@@ -2177,7 +2485,7 @@ function CampDashboardContent() {
                 <div className="p-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
                   <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700">Confirmed Collection Units (Bags)</h3>
                   <span className="text-xs font-bold text-emerald-700">
-                    {roster.filter((r) => r.donationEvent?.collectionUnit).length} units logged
+                    {roster.filter((r) => r.donationEvent && r.donationEvent.outcome === 'COMPLETED').length} units logged
                   </span>
                 </div>
 
@@ -2194,7 +2502,7 @@ function CampDashboardContent() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 font-medium">
-                      {roster.filter((r) => r.donationEvent).length === 0 ? (
+                      {roster.filter((r) => r.donationEvent && r.donationEvent.outcome === 'COMPLETED').length === 0 ? (
                         <tr>
                           <td colSpan={6} className="py-8 text-center text-xs text-slate-500">
                             No collection records yet.
@@ -2202,7 +2510,7 @@ function CampDashboardContent() {
                         </tr>
                       ) : (
                         roster
-                          .filter((r) => r.donationEvent)
+                          .filter((r) => r.donationEvent && r.donationEvent.outcome === 'COMPLETED')
                           .map((item) => {
                             const unit = item.donationEvent?.collectionUnit;
                             return (
@@ -2244,6 +2552,54 @@ function CampDashboardContent() {
                   </table>
                 </div>
               </div>
+
+              {/* Non-Completed / Deferred Episodes Ledger */}
+              {roster.filter((r) => r.donationEvent && r.donationEvent.outcome !== 'COMPLETED').length > 0 && (
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+                  <div className="p-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700">Non-Completed / Deferred Episodes (No Physical Unit)</h3>
+                    <span className="text-xs font-bold text-slate-500">
+                      {roster.filter((r) => r.donationEvent && r.donationEvent.outcome !== 'COMPLETED').length} logged
+                    </span>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs border-collapse">
+                      <thead>
+                        <tr className="border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+                          <th className="py-2.5 px-4">Donor Name</th>
+                          <th className="py-2.5 px-4 text-center">Group</th>
+                          <th className="py-2.5 px-4 text-center">Outcome</th>
+                          <th className="py-2.5 px-4">Notes / Reason</th>
+                          <th className="py-2.5 px-4 text-right">Unit Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 font-medium">
+                        {roster
+                          .filter((r) => r.donationEvent && r.donationEvent.outcome !== 'COMPLETED')
+                          .map((item) => (
+                            <tr key={item.id} className="hover:bg-slate-50/60">
+                              <td className="py-3 px-4 font-semibold text-slate-800">{item.donorName}</td>
+                              <td className="py-3 px-4 text-center font-bold text-slate-900">{item.donationEvent?.bloodGroup}</td>
+                              <td className="py-3 px-4 text-center">
+                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                  item.donationEvent?.outcome === 'NOT_PERFORMED' ? 'bg-amber-100 text-amber-800' :
+                                  item.donationEvent?.outcome === 'ADVERSE_EVENT_STOPPED' ? 'bg-rose-100 text-rose-800' :
+                                  'bg-slate-100 text-slate-700'
+                                }`}>
+                                  {item.donationEvent?.outcome}
+                                </span>
+                              </td>
+                              <td className="py-3 px-4 text-slate-600 text-[11px]">{item.donationEvent?.notes || 'No adverse reaction details recorded'}</td>
+                              <td className="py-3 px-4 text-right text-slate-400 font-semibold text-[11px]">
+                                No Unit Allowed
+                              </td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -2979,16 +3335,18 @@ function CampDashboardContent() {
             </div>
 
             <div className="grid grid-cols-2 gap-2 text-xs font-semibold">
-              <button
-                onClick={() => {
-                  setActivePage('handover');
-                  setShowMobileMore(false);
-                }}
-                className="p-3 bg-slate-50 hover:bg-slate-100 rounded-xl border border-slate-200 text-left flex items-center gap-2.5 text-slate-700"
-              >
-                <IconHandover size={16} className="text-slate-500" />
-                <span>Handover</span>
-              </button>
+              {currentRole === 'CAMP_ADMIN' && (
+                <button
+                  onClick={() => {
+                    setActivePage('handover');
+                    setShowMobileMore(false);
+                  }}
+                  className="p-3 bg-slate-50 hover:bg-slate-100 rounded-xl border border-slate-200 text-left flex items-center gap-2.5 text-slate-700"
+                >
+                  <IconHandover size={16} className="text-slate-500" />
+                  <span>Handover</span>
+                </button>
+              )}
 
               {canViewReports && (
                 <button

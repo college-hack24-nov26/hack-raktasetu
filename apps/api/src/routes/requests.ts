@@ -4,6 +4,9 @@ import { requireAuth, AuthenticatedRequest } from '../middleware/auth';
 import { findMatchingDonorsForRequest, sanitizeDonorName } from '../services/matching';
 import { notifyDonorNewMatch, notifyDonorRequestCancelled } from '../services/whatsapp';
 import { RealtimeService } from '../services/realtime';
+import { parseRequestMessageMetadata, HospitalIntegrationService } from '../services/hospitalIntegration';
+import { BloodRequestCoordinationService } from '../services/bloodRequestCoordination';
+import { AdminMatchingService } from '../services/adminMatchingService';
 export type BloodGroup =
   | 'A_POS'
   | 'A_NEG'
@@ -42,133 +45,46 @@ function parseBloodGroupEnum(input?: string): BloodGroup | null {
  */
 requestsRouter.post('/blood-requests', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
-    const {
-      patientName,
-      bloodGroup,
-      component,
-      unitsRequested,
-      requiredBy,
-      hospitalCode,
-      searchScope,
-      message,
-    } = req.body;
-
-    const parsedGroup = parseBloodGroupEnum(bloodGroup);
-    if (!parsedGroup) {
-      return res.status(400).json({
-        success: false,
-        error: {
-          message: 'Valid blood group (A+, A-, B+, B-, AB+, AB-, O+, O-) is required',
-          code: 'INVALID_BLOOD_GROUP',
-        },
-      });
-    }
-
-    if (!component || typeof component !== 'string' || component.trim().length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: {
-          message: 'Blood component type is required',
-          code: 'INVALID_COMPONENT',
-        },
-      });
-    }
-
-    const units = parseInt(unitsRequested, 10);
-    if (isNaN(units) || units < 1 || units > 50 || units !== Number(unitsRequested)) {
-      return res.status(400).json({
-        success: false,
-        error: {
-          message: 'Requested quantity must be a positive integer between 1 and 50 units',
-          code: 'INVALID_UNITS_REQUESTED',
-        },
-      });
-    }
-
-    let parsedRequiredBy: Date | null = null;
-    if (requiredBy) {
-      parsedRequiredBy = new Date(requiredBy);
-      if (isNaN(parsedRequiredBy.getTime())) {
-        return res.status(400).json({
-          success: false,
-          error: {
-            message: 'requiredBy must be a valid ISO date timestamp',
-            code: 'INVALID_REQUIRED_BY_DATE',
-          },
-        });
-      }
-    }
-
-    // Check centre if provided
-    if (hospitalCode) {
-      const centre = await prisma.bloodCentre.findUnique({
-        where: { hospitalCode: String(hospitalCode).trim() },
-        select: { hospitalCode: true },
-      });
-      if (!centre) {
-        return res.status(400).json({
-          success: false,
-          error: {
-            message: `Selected blood centre with code '${hospitalCode}' was not found`,
-            code: 'CENTRE_NOT_FOUND',
-          },
-        });
-      }
-    }
-
-    let parsedScope: SearchScope = 'EXACT_CENTRE';
-    if (searchScope === 'DISTRICT_EXPANDED' || searchScope === 'OUT_OF_DISTRICT' || searchScope === 'EXACT_CENTRE') {
-      parsedScope = searchScope;
-    }
-
-    const newRequest = await prisma.bloodRequest.create({
-      data: {
-        requesterId: req.user.id,
-        patientName: patientName ? String(patientName).trim().slice(0, 100) : null,
-        bloodGroup: parsedGroup,
-        component: component.trim(),
-        unitsRequested: units,
-        requiredBy: parsedRequiredBy,
-        hospitalCode: hospitalCode ? String(hospitalCode).trim() : null,
-        searchScope: parsedScope,
-        message: message ? String(message).slice(0, 500).trim() : null,
-        status: 'OPEN',
-      },
-      include: {
-        bloodCentre: {
-          select: {
-            hospitalCode: true,
-            hospitalName: true,
-            address: true,
-            mobileNo: true,
-            districtCode: true,
-          },
-        },
-      },
+    const result = await BloodRequestCoordinationService.createCanonicalRequest(req.user.id, {
+      patientName: req.body.patientName,
+      bloodGroup: req.body.bloodGroup,
+      component: req.body.component,
+      unitsRequested: req.body.unitsRequested,
+      requiredBy: req.body.requiredBy,
+      hospitalCode: req.body.hospitalCode,
+      admittedHospitalName: req.body.admittedHospitalName || req.body.hospitalName,
+      receivingFacilityId: req.body.receivingFacilityId,
+      urgency: req.body.urgency,
+      searchScope: req.body.searchScope,
+      message: req.body.message,
+      requesterContact: req.body.requesterContact || req.user.phoneNumber,
+      requesterConsent: req.body.requesterConsent,
     });
 
-    // Audit log
-    await prisma.auditLog.create({
-      data: {
-        userId: req.user.id,
-        action: 'CREATE_BLOOD_REQUEST',
-        resource: 'BloodRequest',
-        resourceId: newRequest.id,
-        metadata: {
-          patientName: newRequest.patientName,
-          bloodGroup: parsedGroup,
-          units,
-          hospitalCode,
-        },
-      },
-    }).catch(() => {});
-
-    return res.status(201).json({
+    return res.status(result.isDuplicateSuppressed ? 200 : 201).json({
       success: true,
-      data: newRequest,
-      message: 'Blood request submitted successfully. Inventory is not guaranteed; select voluntary donors to invite for coordination.',
+      data: result,
+      message: result.isDuplicateSuppressed
+        ? 'Recent request submission recovered.'
+        : 'Blood request submitted successfully.',
+      isDuplicateSuppressed: result.isDuplicateSuppressed,
     });
-  } catch (error) {
+  } catch (error: any) {
+    if (
+      error?.message &&
+      (error.message.includes('required') ||
+        error.message.includes('must be') ||
+        error.message.includes('valid') ||
+        error.message.includes('Invalid'))
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          message: error.message,
+          code: 'VALIDATION_ERROR',
+        },
+      });
+    }
     next(error);
   }
 });
@@ -196,26 +112,216 @@ requestsRouter.get('/blood-requests', requireAuth, async (req: AuthenticatedRequ
             districtCode: true,
           },
         },
+        hospitalIssueOrders: {
+          include: {
+            issuingOrganisation: { select: { id: true, name: true, orgCode: true } },
+            receivingFacility: { select: { id: true, name: true, orgCode: true } },
+            items: true,
+          },
+        },
       },
     });
 
-    // Sanitize mobileNo in bloodCentre
-    const sanitized = requests.map((r: any) => ({
-      ...r,
-      bloodCentre: r.bloodCentre
-        ? {
-            ...r.bloodCentre,
-            mobileNo:
-              r.bloodCentre.mobileNo && r.bloodCentre.mobileNo.trim() !== '0' && r.bloodCentre.mobileNo.trim().length >= 6
-                ? r.bloodCentre.mobileNo.trim()
-                : null,
-          }
-        : null,
-    }));
+    const enriched = requests.map((r: any) => {
+      const meta = parseRequestMessageMetadata(r.message, r.bloodCentre?.hospitalName);
+      const validContact =
+        r.bloodCentre?.mobileNo && r.bloodCentre.mobileNo.trim() !== '0' && r.bloodCentre.mobileNo.trim().length >= 6
+          ? r.bloodCentre.mobileNo.trim()
+          : null;
+
+      let fulfillmentStage = r.closureOutcome || (r.status === 'CLOSED' ? 'FULFILLED' : r.status);
+      const linkedOrder = r.hospitalIssueOrders?.[0];
+      if (linkedOrder) {
+        if (linkedOrder.status === 'RECEIVED') fulfillmentStage = 'FULFILLED';
+        else if (linkedOrder.status === 'RECEIVED_WITH_DISCREPANCIES') fulfillmentStage = 'RECEIVED_WITH_DISCREPANCIES';
+        else if (linkedOrder.status === 'DISPATCHED' || linkedOrder.status === 'PARTIALLY_RECEIVED') fulfillmentStage = 'DISPATCHED';
+        else if (linkedOrder.status === 'AUTHORISED') fulfillmentStage = 'PREPARING';
+      }
+
+      return {
+        ...r,
+        requestReference: `#${r.id.slice(0, 8)}`,
+        admittedHospitalName: meta.hospitalName || r.bloodCentre?.hospitalName || 'Local Medical Centre',
+        receivingFacilityId: meta.receivingFacilityId || null,
+        isHospitalVerified: !!meta.isHospitalVerified,
+        urgency: meta.urgency || 'NORMAL',
+        fulfillmentStatus: fulfillmentStage,
+        canConfirmReceipt: fulfillmentStage === 'DISPATCHED' && !meta.patientAcknowledgedAt,
+        allocatedUnitsCount: meta.allocatedUnitsCount || meta.reservedUnitIds?.length || 0,
+        shortfallCount: meta.shortfallCount !== undefined ? meta.shortfallCount : Math.max(0, r.unitsRequested - (meta.reservedUnitIds?.length || 0)),
+        isPartialAllocation: Boolean(meta.isPartialAllocation || ((meta.reservedUnitIds?.length || 0) > 0 && (meta.reservedUnitIds?.length || 0) < r.unitsRequested)),
+        reservedUnitDetails: meta.reservedUnitDetails || null,
+        transportDetails: meta.transportDetails || null,
+        assignedBankId: meta.assignedBankId || null,
+        assignedBankName: meta.assignedBankName || null,
+        dispatchedAt: meta.dispatchedAt || null,
+        patientAcknowledgedAt: meta.patientAcknowledgedAt || null,
+        bloodCentre: r.bloodCentre
+          ? {
+              ...r.bloodCentre,
+              mobileNo: validContact,
+            }
+          : null,
+      };
+    });
 
     res.json({
       success: true,
-      data: sanitized,
+      data: enriched,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/v1/admin/blood-requests
+ * Platform Admin Operational Blood Request Monitoring endpoint.
+ * Returns platform-wide requests with status filters, counts, routing breakdown, and activity history.
+ */
+requestsRouter.get('/admin/blood-requests', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    if (req.user?.role !== 'ADMIN') {
+      return res.status(403).json({
+        success: false,
+        error: { message: 'Access denied: Platform Administrator privileges required.' },
+      });
+    }
+
+    const { status, urgency, bloodGroup, limit = '50' } = req.query;
+    const maxLimit = Math.min(parseInt(String(limit), 10) || 50, 100);
+
+    const where: any = {};
+    if (status && String(status) !== 'ALL') {
+      const s = String(status).toUpperCase();
+      if (['OPEN', 'CLOSED', 'CANCELLED', 'EXPIRED'].includes(s)) {
+        where.status = s;
+      } else {
+        where.closureOutcome = s;
+      }
+    }
+    if (bloodGroup && String(bloodGroup) !== 'ALL') {
+      const parsed = parseBloodGroupEnum(String(bloodGroup));
+      if (parsed) where.bloodGroup = parsed;
+    }
+
+    const [requests, totalCount, submittedCount, acceptedCount, reservedCount, dispatchedCount, fulfilledCount, closedCount] = await Promise.all([
+      prisma.bloodRequest.findMany({
+        where,
+        take: maxLimit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          requester: { select: { id: true, name: true, phoneNumber: true } },
+          bloodCentre: { select: { hospitalCode: true, hospitalName: true, address: true, mobileNo: true, districtCode: true } },
+          hospitalIssueOrders: {
+            include: {
+              issuingOrganisation: { select: { id: true, name: true, orgCode: true } },
+              receivingFacility: { select: { id: true, name: true, orgCode: true } },
+              items: true,
+            },
+          },
+        },
+      }),
+      prisma.bloodRequest.count(),
+      prisma.bloodRequest.count({ where: { status: 'OPEN', OR: [{ closureOutcome: 'SUBMITTED' }, { closureOutcome: null }, { closureOutcome: 'OPEN' }] } }),
+      prisma.bloodRequest.count({ where: { closureOutcome: 'ACCEPTED' } }),
+      prisma.bloodRequest.count({ where: { closureOutcome: 'STOCK_RESERVED' } }),
+      prisma.bloodRequest.count({ where: { closureOutcome: 'DISPATCHED' } }),
+      prisma.bloodRequest.count({ where: { closureOutcome: 'FULFILLED' } }),
+      prisma.bloodRequest.count({ where: { status: 'CLOSED' } }),
+    ]);
+
+    // Fetch related audit logs for the requests
+    const requestIds = requests.map((r) => r.id);
+    const auditLogs = requestIds.length > 0
+      ? await prisma.auditLog.findMany({
+          where: { resource: 'BloodRequest', resourceId: { in: requestIds } },
+          orderBy: { createdAt: 'desc' },
+          take: 200,
+        })
+      : [];
+
+    const auditMap = new Map<string, any[]>();
+    for (const log of auditLogs) {
+      if (log.resourceId) {
+        if (!auditMap.has(log.resourceId)) auditMap.set(log.resourceId, []);
+        auditMap.get(log.resourceId)!.push({
+          id: log.id,
+          action: log.action,
+          userId: log.userId,
+          metadata: log.metadata,
+          timestamp: log.createdAt.toISOString(),
+        });
+      }
+    }
+
+    const enriched = requests.map((r: any) => {
+      const meta = parseRequestMessageMetadata(r.message, r.bloodCentre?.hospitalName);
+      let fulfillmentStage = r.closureOutcome || (r.status === 'CLOSED' ? 'FULFILLED' : r.status);
+      const linkedOrder = r.hospitalIssueOrders?.[0];
+      if (linkedOrder) {
+        if (linkedOrder.status === 'RECEIVED') fulfillmentStage = 'FULFILLED';
+        else if (linkedOrder.status === 'DISPATCHED') fulfillmentStage = 'DISPATCHED';
+        else if (linkedOrder.status === 'AUTHORISED') fulfillmentStage = 'PREPARING';
+      }
+
+      let routingType = 'DISTRICT_COORDINATION';
+      if (meta.assignedBankId) {
+        routingType = 'DIRECT_PARTICIPATING';
+      } else if (r.hospitalCode && !meta.isExternalDirectory) {
+        routingType = 'DIRECT_PARTICIPATING';
+      } else if (meta.isExternalDirectory || r.bloodCentre) {
+        routingType = 'EXTERNAL_DIRECTORY';
+      }
+
+      return {
+        id: r.id,
+        requestReference: `#${r.id.slice(0, 8)}`,
+        patientName: r.patientName || 'Emergency Patient',
+        requester: r.requester,
+        bloodGroup: r.bloodGroup,
+        component: r.component,
+        unitsRequested: r.unitsRequested,
+        requiredBy: r.requiredBy,
+        urgency: meta.urgency || 'ROUTINE',
+        status: r.status,
+        fulfillmentStatus: fulfillmentStage,
+        closureOutcome: r.closureOutcome,
+        closureFeedback: r.closureFeedback,
+        allocatedUnitsCount: meta.allocatedUnitsCount || meta.reservedUnitIds?.length || 0,
+        shortfallCount: meta.shortfallCount !== undefined ? meta.shortfallCount : Math.max(0, r.unitsRequested - (meta.reservedUnitIds?.length || 0)),
+        isPartialAllocation: Boolean(meta.isPartialAllocation || ((meta.reservedUnitIds?.length || 0) > 0 && (meta.reservedUnitIds?.length || 0) < r.unitsRequested)),
+        reservedUnitDetails: meta.reservedUnitDetails || null,
+        hospitalCode: r.hospitalCode,
+        admittedHospitalName: meta.hospitalName || r.bloodCentre?.hospitalName || 'Local Medical Centre',
+        isHospitalVerified: Boolean(meta.isHospitalVerified),
+        receivingFacilityId: meta.receivingFacilityId || null,
+        assignedBankId: meta.assignedBankId || null,
+        assignedBankName: meta.assignedBankName || r.bloodCentre?.hospitalName || null,
+        routingType,
+        transportDetails: meta.transportDetails || null,
+        patientAcknowledgedAt: meta.patientAcknowledgedAt || null,
+        patientAcknowledgedBy: meta.patientAcknowledgedBy || null,
+        receiptNotes: meta.receiptNotes || null,
+        confirmedByRole: meta.confirmedByRole || null,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+        activityHistory: auditMap.get(r.id) || [],
+      };
+    });
+
+    res.status(200).json({
+      success: true,
+      data: enriched,
+      metrics: {
+        total: totalCount,
+        submitted: submittedCount,
+        accepted: acceptedCount,
+        reserved: reservedCount,
+        dispatched: dispatchedCount,
+        fulfilled: fulfilledCount,
+        closed: closedCount,
+      },
     });
   } catch (error) {
     next(error);
@@ -224,7 +330,12 @@ requestsRouter.get('/blood-requests', requireAuth, async (req: AuthenticatedRequ
 
 /**
  * GET /api/v1/blood-requests/:id
- * Retrieve a specific blood request with strict ownership check
+ * Retrieve a specific blood request with authorized ownership check
+ * Permitted for:
+ * 1. The original requester
+ * 2. Platform Admin
+ * 3. Authorised staff of the designated blood bank
+ * 4. Authorised staff of the admitted/receiving hospital
  */
 requestsRouter.get('/blood-requests/:id', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
@@ -233,6 +344,13 @@ requestsRouter.get('/blood-requests/:id', requireAuth, async (req: Authenticated
     const request = await prisma.bloodRequest.findUnique({
       where: { id },
       include: {
+        requester: {
+          select: {
+            id: true,
+            name: true,
+            phoneNumber: true,
+          },
+        },
         bloodCentre: {
           select: {
             hospitalCode: true,
@@ -240,6 +358,26 @@ requestsRouter.get('/blood-requests/:id', requireAuth, async (req: Authenticated
             address: true,
             mobileNo: true,
             districtCode: true,
+          },
+        },
+        hospitalIssueOrders: {
+          include: {
+            issuingOrganisation: { select: { id: true, name: true, orgCode: true } },
+            receivingFacility: { select: { id: true, name: true, orgCode: true } },
+            items: {
+              include: {
+                componentUnit: {
+                  select: {
+                    id: true,
+                    componentCode: true,
+                    componentType: true,
+                    bloodGroup: true,
+                    status: true,
+                  },
+                },
+              },
+            },
+            discrepancies: true,
           },
         },
       },
@@ -255,12 +393,44 @@ requestsRouter.get('/blood-requests/:id', requireAuth, async (req: Authenticated
       });
     }
 
-    // Ownership enforcement
-    if (request.requesterId !== req.user.id && req.user.role !== 'ADMIN') {
+    const meta = parseRequestMessageMetadata(request.message, request.bloodCentre?.hospitalName);
+
+    // Ownership & Authorisation enforcement
+    const isRequester = request.requesterId === req.user.id;
+    const isPlatformAdmin = req.user.role === 'ADMIN';
+
+    let isAuthorizedOrgMember = false;
+    if (!isRequester && !isPlatformAdmin) {
+      const userMemberships = await prisma.organisationMembership.findMany({
+        where: { userId: req.user.id, isActive: true },
+        include: { organisation: true },
+      });
+
+      const userOrgCodes = userMemberships.map((m) => m.organisation.orgCode);
+      const userOrgIds = userMemberships.map((m) => m.organisation.id);
+      const userHospitalCodes = userMemberships
+        .map((m) => m.organisation.hospitalCode)
+        .filter(Boolean) as string[];
+
+      const targetCode = request.hospitalCode;
+      if (
+        (targetCode &&
+          (userOrgCodes.includes(targetCode) ||
+            userOrgIds.includes(targetCode) ||
+            userHospitalCodes.includes(targetCode))) ||
+        (meta.assignedBankId && userOrgIds.includes(meta.assignedBankId))
+      ) {
+        isAuthorizedOrgMember = true;
+      } else if (meta.receivingFacilityId && userOrgIds.includes(meta.receivingFacilityId)) {
+        isAuthorizedOrgMember = true;
+      }
+    }
+
+    if (!isRequester && !isPlatformAdmin && !isAuthorizedOrgMember) {
       return res.status(403).json({
         success: false,
         error: {
-          message: 'Access denied. You can only view your own blood requests.',
+          message: 'Access denied. You can only view blood requests associated with your account or organisation.',
           code: 'FORBIDDEN_ACCESS',
         },
       });
@@ -273,10 +443,51 @@ requestsRouter.get('/blood-requests/:id', requireAuth, async (req: Authenticated
         ? request.bloodCentre.mobileNo.trim()
         : null;
 
+    let fulfillmentStage = request.closureOutcome || (request.status === 'CLOSED' ? 'FULFILLED' : request.status);
+    const linkedOrder = request.hospitalIssueOrders?.[0];
+    if (linkedOrder) {
+      if (linkedOrder.status === 'RECEIVED') fulfillmentStage = 'FULFILLED';
+      else if (linkedOrder.status === 'RECEIVED_WITH_DISCREPANCIES') fulfillmentStage = 'RECEIVED_WITH_DISCREPANCIES';
+      else if (linkedOrder.status === 'DISPATCHED' || linkedOrder.status === 'PARTIALLY_RECEIVED') fulfillmentStage = 'DISPATCHED';
+      else if (linkedOrder.status === 'AUTHORISED') fulfillmentStage = 'PREPARING';
+    }
+
     res.json({
       success: true,
       data: {
         ...request,
+        requestReference: `#${request.id.slice(0, 8)}`,
+        admittedHospitalName: meta.hospitalName || request.bloodCentre?.hospitalName || 'Local Medical Centre',
+        receivingFacilityId: meta.receivingFacilityId || null,
+        isHospitalVerified: !!meta.isHospitalVerified,
+        urgency: meta.urgency || 'NORMAL',
+        fulfillmentStatus: fulfillmentStage,
+        canConfirmReceipt: fulfillmentStage === 'DISPATCHED' && !meta.patientAcknowledgedAt,
+        allocatedUnitsCount: meta.allocatedUnitsCount || meta.reservedUnitIds?.length || 0,
+        shortfallCount: meta.shortfallCount !== undefined ? meta.shortfallCount : Math.max(0, request.unitsRequested - (meta.reservedUnitIds?.length || 0)),
+        isPartialAllocation: Boolean(meta.isPartialAllocation || ((meta.reservedUnitIds?.length || 0) > 0 && (meta.reservedUnitIds?.length || 0) < request.unitsRequested)),
+        reservedUnitDetails: meta.reservedUnitDetails || null,
+        transportDetails: meta.transportDetails || null,
+        assignedBankId: meta.assignedBankId || null,
+        assignedBankName: meta.assignedBankName || null,
+        dispatchedAt: meta.dispatchedAt || null,
+        patientAcknowledgedAt: meta.patientAcknowledgedAt || null,
+        patientAcknowledgementNotes: meta.patientAcknowledgementNotes || null,
+        matchingStatus: meta.matchingRequest?.status || null,
+        donorCoordinationStatus: meta.matchingRequest
+          ? meta.matchingRequest.status === 'RELEASED'
+            ? 'DONOR_COORDINATION_ACTIVE'
+            : 'COORDINATING_AVAILABILITY'
+          : null,
+        matchingRequest: isRequester && !isPlatformAdmin
+          ? meta.matchingRequest
+            ? {
+                status: meta.matchingRequest.status,
+                requestedAt: meta.matchingRequest.requestedAt,
+                isCoordinating: true,
+              }
+            : null
+          : meta.matchingRequest || null,
         bloodCentre: request.bloodCentre
           ? {
               ...request.bloodCentre,
@@ -331,11 +542,12 @@ requestsRouter.post(
         });
       }
 
-      if (request.requesterId !== req.user.id && req.user.role !== 'ADMIN') {
+      // Phase 3 Hard Rule: Patients/requesters are strictly forbidden from directly sending donor invitations
+      if (req.user.role !== 'ADMIN') {
         return res.status(403).json({
           success: false,
           error: {
-            message: 'Access denied. You can only invite donors to your own requests.',
+            message: 'Direct donor invitation by patients is disabled. Donor matching and coordination are handled securely by the designated Blood Bank and System Administration.',
             code: 'FORBIDDEN_ACCESS',
           },
         });
@@ -900,7 +1112,11 @@ requestsRouter.post(
 
 /**
  * GET /api/v1/blood-requests/:id/matching-donors
- * Requester views matching voluntary donors across 3 priority levels
+ * Phase 3: Protected donor matching view.
+ * HARD RULES:
+ * 1. Patients / requesters are strictly forbidden from viewing candidate lists (403 Forbidden).
+ * 2. Only designated Blood Bank staff (after candidate release) or Platform Admins can view candidates.
+ * 3. Other blood banks receive 403 Forbidden.
  */
 requestsRouter.get(
   '/blood-requests/:id/matching-donors',
@@ -912,7 +1128,9 @@ requestsRouter.get(
 
       const request = await prisma.bloodRequest.findUnique({
         where: { id },
-        select: { requesterId: true, status: true },
+        include: {
+          bloodCentre: true,
+        },
       });
 
       if (!request) {
@@ -925,24 +1143,97 @@ requestsRouter.get(
         });
       }
 
-      // Ownership enforcement
-      if (request.requesterId !== req.user.id && req.user.role !== 'ADMIN') {
+      // Hard Rule 1: Patients and requesters are NEVER permitted to directly search donors or see candidate lists
+      if (request.requesterId === req.user.id && req.user.role !== 'ADMIN') {
         return res.status(403).json({
           success: false,
           error: {
-            message: 'Access denied. You can only view matching donors for your own requests.',
+            message: 'Patients and requesters are not permitted to directly search or view donor candidate lists. Fulfilment and matching are coordinated directly by the Blood Bank.',
             code: 'FORBIDDEN_ACCESS',
           },
         });
       }
 
-      const matchResults = await findMatchingDonorsForRequest(id, requestedScope);
+      const meta = parseRequestMessageMetadata(request.message, request.bloodCentre?.hospitalName);
+
+      // Hard Rule 2: If caller is not Platform Admin, verify they belong to the designated Blood Bank
+      if (req.user.role !== 'ADMIN') {
+        const userMemberships = await prisma.organisationMembership.findMany({
+          where: { userId: req.user.id, isActive: true },
+          include: { organisation: true },
+        });
+
+        const userOrgIds = userMemberships.map((m) => m.organisation.id);
+        const userHospitalCodes = userMemberships
+          .map((m) => m.organisation.hospitalCode)
+          .filter(Boolean) as string[];
+        const userOrgCodes = userMemberships.map((m) => m.organisation.orgCode);
+
+        const isDesignatedBank =
+          (meta.assignedBankId && userOrgIds.includes(meta.assignedBankId)) ||
+          (request.hospitalCode &&
+            (userOrgCodes.includes(request.hospitalCode) ||
+              userOrgIds.includes(request.hospitalCode) ||
+              userHospitalCodes.includes(request.hospitalCode)));
+
+        if (!isDesignatedBank) {
+          return res.status(403).json({
+            success: false,
+            error: {
+              message: 'Access denied. Only the designated Blood Bank handling this request can access candidate information.',
+              code: 'FORBIDDEN_ACCESS',
+            },
+          });
+        }
+
+        // Blood Bank view: only allowed if candidates have been released by Admin
+        const mr = meta.matchingRequest;
+        if (!mr || mr.status !== 'RELEASED') {
+          return res.json({
+            success: true,
+            data: {
+              status: mr?.status || 'NOT_REQUESTED',
+              isReleased: false,
+              candidates: [],
+              message: mr
+                ? `Candidates have not yet been released by System Administration. Current status: ${mr.status}.`
+                : 'Donor matching has not been requested for this request.',
+            },
+          });
+        }
+
+        const orgId = meta.assignedBankId || userOrgIds[0];
+        const releasedData = await AdminMatchingService.getReleasedCandidatesForBloodBank(
+          req.user.id,
+          req.user.role,
+          orgId,
+          id
+        );
+
+        return res.json({
+          success: true,
+          data: releasedData,
+        });
+      }
+
+      // Platform Admin: full deterministic ranking search
+      const matchResults = await AdminMatchingService.runMatchingSearch(
+        req.user.id,
+        id,
+        requestedScope
+      );
 
       res.json({
         success: true,
         data: matchResults,
       });
-    } catch (error) {
+    } catch (error: any) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({
+          success: false,
+          error: { message: error.message, code: error.code || 'MATCHING_ERROR' },
+        });
+      }
       next(error);
     }
   }
@@ -950,7 +1241,7 @@ requestsRouter.get(
 
 /**
  * PATCH /api/v1/blood-requests/:id/scope
- * Requester explicitly expands or adjusts search scope for coordination
+ * Phase 3: Only System Admin can adjust or expand search scope.
  */
 requestsRouter.patch(
   '/blood-requests/:id/scope',
@@ -958,7 +1249,18 @@ requestsRouter.patch(
   async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
       const id = String(req.params.id);
-      const { searchScope } = req.body;
+      const { searchScope, expansionReason } = req.body;
+
+      // Hard Rule: Only Platform Admin can modify search scope
+      if (req.user.role !== 'ADMIN') {
+        return res.status(403).json({
+          success: false,
+          error: {
+            message: 'Access denied. Search scope can only be modified by System Administration.',
+            code: 'FORBIDDEN_ACCESS',
+          },
+        });
+      }
 
       const validScopes = ['EXACT_CENTRE', 'DISTRICT_EXPANDED', 'OUT_OF_DISTRICT'];
       if (!searchScope || !validScopes.includes(searchScope)) {
@@ -985,54 +1287,35 @@ requestsRouter.patch(
         });
       }
 
-      // Ownership enforcement
-      if (request.requesterId !== req.user.id && req.user.role !== 'ADMIN') {
-        return res.status(403).json({
-          success: false,
-          error: {
-            message: 'Access denied. You can only update your own requests.',
-            code: 'FORBIDDEN_ACCESS',
-          },
-        });
-      }
-
-      if (request.status !== 'OPEN') {
+      if (['CLOSED', 'CANCELLED', 'EXPIRED'].includes(request.status)) {
         return res.status(400).json({
           success: false,
           error: {
             message: `Cannot change scope of request in '${request.status}' status.`,
-            code: 'REQUEST_NOT_OPEN',
+            code: 'INVALID_STATUS',
           },
         });
       }
 
-      const updated = await prisma.bloodRequest.update({
-        where: { id },
-        data: {
-          searchScope,
-        },
-      });
-
-      // Audit log
-      await prisma.auditLog.create({
-        data: {
-          userId: req.user.id,
-          action: 'UPDATE_REQUEST_SCOPE',
-          resource: 'BloodRequest',
-          resourceId: id,
-          metadata: {
-            previousScope: request.searchScope,
-            newScope: searchScope,
-          },
-        },
-      });
+      const result = await AdminMatchingService.runMatchingSearch(
+        req.user.id,
+        id,
+        searchScope,
+        expansionReason
+      );
 
       res.json({
         success: true,
-        data: updated,
-        message: `Search scope updated to ${searchScope}.`,
+        data: result,
+        message: `Search scope updated to ${searchScope} and candidate pool refreshed.`,
       });
-    } catch (error) {
+    } catch (error: any) {
+      if (error.statusCode) {
+        return res.status(error.statusCode).json({
+          success: false,
+          error: { message: error.message, code: error.code || 'SCOPE_UPDATE_ERROR' },
+        });
+      }
       next(error);
     }
   }
@@ -1076,12 +1359,12 @@ requestsRouter.get(
         });
       }
 
-      // Ownership enforcement
-      if (request.requesterId !== req.user.id && req.user.role !== 'ADMIN') {
+      // Ownership and Role enforcement: Patients/requesters are strictly forbidden from viewing candidate identities or contacts
+      if (req.user.role !== 'ADMIN') {
         return res.status(403).json({
           success: false,
           error: {
-            message: 'Access denied. You can only view responses for your own requests.',
+            message: 'Direct access to donor candidate contact details by patients is disabled to protect voluntary donor privacy and ensure clinical coordination through accredited Blood Banks.',
             code: 'FORBIDDEN_ACCESS',
           },
         });

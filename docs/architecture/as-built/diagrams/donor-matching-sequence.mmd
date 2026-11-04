@@ -1,0 +1,52 @@
+sequenceDiagram
+    autonumber
+    actor BankStaff as Blood Bank Staff (ORG_ADMIN / INVENTORY_STAFF)
+    participant BankUI as Blood Bank Portal
+    participant API as Express API (:4000)
+    participant AdminSvc as AdminMatchingService
+    participant DB as PostgreSQL
+    participant WSS as WebSocket Server
+    actor SysAdmin as Platform System Admin
+    participant AdminUI as System Admin Portal
+
+    %% Step 1: Matching Trigger
+    BankStaff->>BankUI: Views incoming request with Shortfall = N
+    BankStaff->>BankUI: Clicks "Request Donor Matching"
+    BankUI->>API: POST /api/v1/organisation/:orgId/requests/:reqId/request-matching
+    API->>AdminSvc: requestDonorMatching(requestId, orgId, shortfall)
+    AdminSvc->>DB: UPDATE blood_requests SET message.matchingRequest = { status: 'REQUESTED' }
+    AdminSvc->>WSS: emit('blood_request.matching_requested')
+    WSS-->>AdminUI: Pushes event to System Admin queue
+    API-->>BankUI: HTTP 200 (Status: REQUESTED)
+
+    %% Step 2: Admin Matching Run
+    SysAdmin->>AdminUI: Reviews Matching Request Queue
+    SysAdmin->>AdminUI: Clicks "Run Matching Algorithm"
+    AdminUI->>API: POST /api/v1/admin/donor-matching/requests/:reqId/run
+    API->>AdminSvc: executeMatchingRun(requestId, scope, adminId)
+    AdminSvc->>DB: Query compatible donors with hard filters
+    AdminSvc->>AdminSvc: Score and rank deterministically
+    AdminSvc->>DB: UPDATE blood_requests SET message.matchingRequest = { status: 'CANDIDATES_FOUND' }
+    AdminSvc->>DB: INSERT into audit_logs (ADMIN_MATCHING_RUN)
+    AdminSvc->>WSS: emit('blood_request.matching_searched')
+    WSS-->>BankUI: Status badge updates: "Candidates Under Admin Review"
+    API-->>AdminUI: HTTP 200 (Ranked candidates with reason codes)
+
+    %% Step 3: Admin Review & Candidate Release
+    SysAdmin->>AdminUI: Checks candidate checkboxes & clicks "Release Candidates"
+    AdminUI->>API: POST /api/v1/admin/donor-matching/requests/:reqId/release
+    API->>AdminSvc: releaseCandidateList(requestId, selectedCandidateIds, adminId)
+    AdminSvc->>DB: UPDATE blood_requests SET message.matchingRequest = { status: 'RELEASED' }
+    AdminSvc->>DB: INSERT into audit_logs (ADMIN_CANDIDATE_RELEASE)
+    AdminSvc->>WSS: emit('blood_request.matching_released')
+    WSS-->>BankUI: Status badge updates: "Candidates Released (Ready for Outreach)"
+    API-->>AdminUI: HTTP 200 (Release confirmed)
+
+    %% Step 4: Bank Fetches Pool
+    BankStaff->>BankUI: Clicks "Review Released Candidate Pool"
+    BankUI->>API: GET /api/v1/organisation/:orgId/requests/:reqId/matching-candidates
+    API->>AdminSvc: getReleasedCandidatesForBank(requestId, orgId)
+    AdminSvc->>DB: SELECT donor_profiles WHERE id IN (releasedCandidateIds)
+    AdminSvc-->>API: Masked candidates (disclosureAuthorized: false)
+    API-->>BankUI: HTTP 200 (Display Candidate Pool Modal)
+

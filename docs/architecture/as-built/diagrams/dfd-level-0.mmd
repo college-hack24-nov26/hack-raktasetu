@@ -1,0 +1,34 @@
+flowchart TD
+    classDef procStyle fill:#1e40af,stroke:#1e3a8a,color:#ffffff;
+    classDef actorStyle fill:#047857,stroke:#065f46,color:#ffffff;
+    classDef extStyle fill:#b45309,stroke:#92400e,color:#ffffff;
+
+    Patient[Patient / Requester]:::actorStyle
+    Donor[Voluntary Blood Donor]:::actorStyle
+    BloodBank[Blood Bank Personnel]:::actorStyle
+    SysAdmin[System Administrator]:::actorStyle
+    eRaktKosh[e-RaktKosh Govt Portal]:::extStyle
+    WhatsApp[WhatsApp Cloud API]:::extStyle
+
+    subgraph DFD0 ["Level 0: RaktaSetu Context Diagram"]
+        SystemProcess(("0.0\nRaktaSetu Platform\nCore System")):::procStyle
+    end
+
+    Patient -->|"Blood Search Query, Emergency Request, Receipt Ack"| SystemProcess
+    SystemProcess -->|"Directory Listings, Request Status, Realtime Updates"| Patient
+
+    Donor -->|"Profile Info, Live GPS, Invitation Responses"| SystemProcess
+    SystemProcess -->|"Matching Outreach Notifications, Blood Drive Alerts"| Donor
+
+    BloodBank -->|"Stock Inventory, Matching Requests, Dispatch Manifests"| SystemProcess
+    SystemProcess -->|"Incoming Patient Requests, Released Donors Pool"| BloodBank
+
+    SysAdmin -->|"Bank Authorizations, Matching Runs, Release Approvals"| SystemProcess
+    SystemProcess -->|"System Metrics, Audit Logs, Verification Queues"| SysAdmin
+
+    SystemProcess -->|"Scrape / Query Blood Availability"| eRaktKosh
+    eRaktKosh -->|"External Centre Directory & Live Stock Data"| SystemProcess
+
+    SystemProcess -->|"Send OTPs & Outreach WhatsApp Templates"| WhatsApp
+    WhatsApp -->|"Webhook Delivery Receipts & Inbound Replies"| SystemProcess
+

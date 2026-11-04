@@ -1,4 +1,5 @@
 import { prisma } from '../lib/prisma';
+import { parseRequestMessageMetadata } from './hospitalIntegration';
 
 export type MatchLevel = 'LEVEL_1_CENTRE' | 'LEVEL_2_DISTRICT' | 'LEVEL_3_EXPANDED';
 
@@ -336,6 +337,7 @@ export async function findEligibleRequestsForDonor(donorUserId: string) {
 
     const myResponse = req.recipientResponses[0] || null;
     const isAccepted = myResponse?.status === 'ACCEPTED';
+    const meta = parseRequestMessageMetadata(req.message, req.bloodCentre?.hospitalName);
 
     // Phase 4: Authorized requester contact only revealed after acceptance on active request
     const disclosedRequesterPhone =
@@ -343,24 +345,47 @@ export async function findEligibleRequestsForDonor(donorUserId: string) {
         ? req.requester?.phoneNumber
         : null;
 
+    const recommendedCentre = req.bloodCentre
+      ? {
+          hospitalCode: req.bloodCentre.hospitalCode,
+          hospitalName: req.bloodCentre.hospitalName,
+          address: req.bloodCentre.address,
+          phone: req.bloodCentre.mobileNo && req.bloodCentre.mobileNo !== '0' ? req.bloodCentre.mobileNo : null,
+          districtCode: req.bloodCentre.districtCode,
+        }
+      : meta.assignedBankName
+      ? {
+          hospitalCode: req.hospitalCode || 'ASSIGNED_BANK',
+          hospitalName: meta.assignedBankName,
+          address: 'Designated Participating Blood Centre',
+          phone: null,
+          districtCode: donor.districtCode,
+        }
+      : null;
+
     matchingRequests.push({
       id: req.id,
+      requestReference: `#${req.id.slice(0, 8)}`,
       patientName: req.patientName || null,
+      admittedHospitalName: meta.hospitalName || 'Designated Healthcare Facility',
       requesterName: isAccepted ? req.requester?.name : 'Authorized Requester',
       requesterPhone: disclosedRequesterPhone,
       bloodGroup: req.bloodGroup,
       component: req.component,
       unitsRequested: req.unitsRequested,
       requiredBy: req.requiredBy,
-      hospitalName: req.bloodCentre?.hospitalName || 'Designated Centre',
-      hospitalAddress: req.bloodCentre?.address || null,
-      hospitalPhone: req.bloodCentre?.mobileNo || null,
-      districtCode: req.bloodCentre?.districtCode,
+      hospitalName: recommendedCentre?.hospitalName || req.bloodCentre?.hospitalName || 'Designated Centre',
+      hospitalAddress: recommendedCentre?.address || req.bloodCentre?.address || null,
+      hospitalPhone: recommendedCentre?.phone || req.bloodCentre?.mobileNo || null,
+      districtCode: req.bloodCentre?.districtCode || donor.districtCode,
       searchScope: req.searchScope,
       message: req.message,
       requestStatus: req.status,
       closureOutcome: req.closureOutcome || null,
       reportedDonationStatus: req.reportedDonationStatus || null,
+      recommendedCentre,
+      donationInstructions:
+        'Please coordinate voluntary donation at the recommended accredited blood bank above. Under strict medical safety guidelines, never attempt to deliver blood directly to the patient or hospital ward.',
       createdAt: req.createdAt,
       matchTier,
       myResponse: myResponse

@@ -1,0 +1,26 @@
+flowchart LR
+    classDef webOnly fill:#3b82f6,stroke:#1d4ed8,color:#ffffff;
+    classDef mobileOnly fill:#10b981,stroke:#047857,color:#ffffff;
+    classDef sharedParity fill:#8b5cf6,stroke:#6d28d9,color:#ffffff;
+
+    subgraph WebExclusive ["Web-Only Workflows"]
+        W1["Platform Admin Matching Operations\n(Run algorithm, review, candidate release)"]:::webOnly
+        W2["Blood Bank Inventory Processing & Lab\n(Component derivation, TTI lab recording, clinical release)"]:::webOnly
+        W3["Handover Manifest Dispatch & Reconciliation\n(PDF manifest export, discrepancy logging)"]:::webOnly
+        W4["Org Staff Role Assignment & Org Settings\n(Invite staff, toggle permissions)"]:::webOnly
+    end
+
+    subgraph SharedFeatures ["Shared Cross-Platform Features"]
+        S1["Blood Centre & Stock Availability Directory"]:::sharedParity
+        S2["Emergency Blood Request Submission & Tracking"]:::sharedParity
+        S3["Donor Registration & Profile Management"]:::sharedParity
+        S4["Camp Operations Dashboard & Screening Check-In"]:::sharedParity
+        S5["Realtime Notifications & Event Updates"]:::sharedParity
+    end
+
+    subgraph MobileExclusive ["Mobile-Exclusive Workflows"]
+        M1["Background GPS Location Tracking\n(expo-task-manager, background location task)"]:::mobileOnly
+        M2["Interactive Bottom Navigation Bar\n(Home, Find Blood, Nearby Donors, Requests, Profile)"]:::mobileOnly
+        M3["Offline Cached Camp Assignments Hint\n(expo-secure-store)"]:::mobileOnly
+    end
+

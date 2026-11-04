@@ -1,0 +1,56 @@
+flowchart TD
+    startNode([Start: Patient Needs Blood]) --> createReq[Patient creates Blood Request with Hospital & Blood Bank]
+    createReq --> persistReq[Canonical Request Persisted with Status OPEN]
+    persistReq --> routeToBank[Request Routed to Designated Blood Bank via Realtime & API]
+    
+    routeToBank --> checkStock{Eligible Released Stock Sufficient?}
+    
+    %% Stock sufficient path
+    checkStock -->|Yes: Full Stock Available| reserveStock[Reserve & Allocate Component Units]
+    reserveStock --> createIssueOrder[Generate Hospital Issue Order]
+    createIssueOrder --> dispatchUnits[Blood Bank Prepares & Dispatches Handover]
+    dispatchUnits --> transit[Transport in Cold Chain to Hospital]
+    transit --> hospReceipt[Hospital Clinical Staff Verifies & Receives Units]
+    hospReceipt --> patientAck[Patient Acknowledges Receipt]
+    patientAck --> requestClosed([End: Blood Request Fulfilled & CLOSED])
+
+    %% Stock shortfall path
+    checkStock -->|No: Partial or Zero Stock| calcShortfall[Calculate Shortfall = Required Units - Available Units]
+    calcShortfall --> allocatePartial[Allocate Partial Stock if any]
+    allocatePartial --> triggerMatching[Blood Bank Clicks: Request Donor Matching for Shortfall]
+    triggerMatching --> notifyAdmin[System Admin Receives Matching Request in Realtime]
+    
+    notifyAdmin --> adminRunMatching[System Admin Triggers Matching Algorithm]
+    adminRunMatching --> hardFilter[Apply Hard Eligibility Filters: 90-Day Interval, Age, Status]
+    hardFilter --> geoRanking[Rank Donors Deterministically: Scope, Proximity, Regular History]
+    geoRanking --> adminReview[System Admin Reviews Ranked Candidates]
+    adminReview --> adminRelease[System Admin Explicitly Releases Approved Candidates]
+    
+    adminRelease --> notifyBank[Only Requesting Blood Bank Receives Released Candidates]
+    notifyBank --> bankOutreach[Blood Bank Contacts Donors via App / Call]
+    
+    bankOutreach --> donorResponse{Donor Response}
+    donorResponse -->|Declines| markDeclined[Record Decline: Candidate Removed for this Request]
+    markDeclined --> checkRemaining{Shortfall Remaining?}
+    checkRemaining -->|Yes| bankOutreach
+    checkRemaining -->|No / Expired| cancelRemaining[Close Unmet Shortfall]
+    
+    donorResponse -->|Accepts| donorArrival[Donor Coordinates Arrival at Designated Blood Bank]
+    donorArrival --> intakeVerif[Staff Verifies Donor Identity & Intake Check-In]
+    intakeVerif --> clinicalScreen[Clinical Staff Conducts Screening & Deferral Check]
+    
+    clinicalScreen --> screenResult{Clinical Decision}
+    screenResult -->|Deferred / Unfit| recordDeferral[Stop Donation & Record Deferral Reason]
+    recordDeferral --> checkRemaining
+    
+    screenResult -->|Cleared| phlebotomy[Phlebotomist Collects Blood Unit & Barcodes Bag]
+    phlebotomy --> labTesting[Laboratory Testing: TTI HIV/HBsAg/HCV & Blood Grouping]
+    
+    labTesting --> testResult{TTI Results Non-Reactive?}
+    testResult -->|Reactive / Failed| quarantineDiscard[Quarantine Unit & Order Discard]
+    quarantineDiscard --> checkRemaining
+    
+    testResult -->|Clear| clinicalRelease[Authorized MO Signs Off Clinical Release]
+    clinicalRelease --> stockUpdate[New Inventory Unit Released into Available Stock]
+    stockUpdate --> reserveStock
+

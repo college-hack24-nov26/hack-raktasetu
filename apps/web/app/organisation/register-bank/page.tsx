@@ -3,8 +3,9 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { authFetch } from '../../config/api';
-import { STATES_AND_DISTRICTS, DEFAULT_STATE_CODE, getDistrictsForState } from '../../config/geography';
+import { DEFAULT_STATE_CODE, getDistrictsForState } from '../../config/geography';
 import { isValidIndianMobile } from '../../config/phone';
+import BloodBankLocationPicker from '../../components/map/BloodBankLocationPicker';
 
 export default function RegisterBankPage() {
   const [hospitalName, setHospitalName] = useState('');
@@ -14,6 +15,12 @@ export default function RegisterBankPage() {
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [componentTypes, setComponentTypes] = useState<string[]>(['PRBC', 'Whole Blood']);
+  const [confirmedLocation, setConfirmedLocation] = useState<{
+    latitude: number;
+    longitude: number;
+    address: string;
+  } | null>(null);
+
   const [submitted, setSubmitted] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -27,6 +34,11 @@ export default function RegisterBankPage() {
     );
   };
 
+  const handleLocationConfirmed = (loc: { latitude: number; longitude: number; address: string }) => {
+    setConfirmedLocation(loc);
+    setErrorMessage(null);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
@@ -38,6 +50,11 @@ export default function RegisterBankPage() {
 
     if (!isValidIndianMobile(phone)) {
       setErrorMessage('Please enter a valid 10-digit Indian mobile number for the medical officer contact.');
+      return;
+    }
+
+    if (!confirmedLocation) {
+      setErrorMessage('Facility Entrance Location Confirmation is required. Please position the pin and confirm coordinates on the map below before submitting.');
       return;
     }
 
@@ -58,6 +75,9 @@ export default function RegisterBankPage() {
           email: email.trim() || 'contact@bloodbank.org',
           phone: phone.trim(),
           componentTypes,
+          latitude: confirmedLocation.latitude,
+          longitude: confirmedLocation.longitude,
+          locationAddress: confirmedLocation.address,
         }),
       });
 
@@ -77,7 +97,7 @@ export default function RegisterBankPage() {
 
   return (
     <div className="flex-1 bg-slate-50 min-h-screen py-10 px-4 sm:px-6">
-      <div className="max-w-2xl mx-auto">
+      <div className="max-w-3xl mx-auto">
         <div className="mb-6">
           <nav className="flex items-center gap-2 text-xs text-slate-500 font-medium">
             <Link href="/" className="hover:text-[#B91C32]">Home</Link>
@@ -88,7 +108,7 @@ export default function RegisterBankPage() {
           </nav>
         </div>
 
-        <div className="bg-white rounded-3xl border border-slate-200 p-8 shadow-sm">
+        <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 shadow-sm">
           <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-red-100/80 text-[#B91C32] text-xs font-bold uppercase tracking-wider mb-3">
             <span>Institutional Onboarding</span>
           </div>
@@ -97,15 +117,15 @@ export default function RegisterBankPage() {
           </h1>
           <p className="text-xs sm:text-sm text-slate-600 mb-6 leading-relaxed">
             Apply to integrate your hospital blood centre or charitable blood bank into RaktaSetu&apos;s
-            verified directory.
+            verified directory with exact location mapping for donor emergency proximity matching.
           </p>
 
           <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 mb-6 space-y-1">
-            <span className="font-bold block">⚠️ Licensing &amp; Compliance Requirement:</span>
+            <span className="font-bold block">⚠️ Licensing &amp; Location Compliance:</span>
             <p className="leading-relaxed">
               In accordance with national blood transfusion guidelines, inclusion in the live public directory
               requires valid licensing issued by the Central Drugs Standard Control Organisation (CDSCO) and
-              the State Blood Transfusion Council.
+              the State Blood Transfusion Council, as well as verified facility entrance coordinates for donor dispatch.
             </p>
           </div>
 
@@ -131,6 +151,21 @@ export default function RegisterBankPage() {
               <div className="p-3 bg-white rounded-xl border border-emerald-200 max-w-sm mx-auto font-mono text-xs font-bold text-slate-800 select-all">
                 {createdAppId || 'SUBMITTED'}
               </div>
+
+              {confirmedLocation && (
+                <div className="p-3 bg-white/80 rounded-xl border border-emerald-200 max-w-md mx-auto text-left text-xs space-y-1">
+                  <div className="font-bold text-slate-700">📍 Confirmed Facility Entrance:</div>
+                  <div className="font-mono text-[11px] text-slate-600">
+                    {confirmedLocation.latitude.toFixed(6)}° N, {confirmedLocation.longitude.toFixed(6)}° E
+                  </div>
+                  {confirmedLocation.address && (
+                    <div className="text-[11px] text-slate-500 italic truncate">
+                      {confirmedLocation.address}
+                    </div>
+                  )}
+                </div>
+              )}
+
               <p className="text-[11px] text-slate-600 leading-relaxed max-w-md mx-auto">
                 Next Step: A Platform Administrator will review your license number (<strong>{licenseNumber}</strong>)
                 and CDSCO compliance. Upon approval, your initial <strong>ORG_ADMIN</strong> institutional workspace will be provisioned.
@@ -152,134 +187,181 @@ export default function RegisterBankPage() {
               </div>
             </div>
           ) : (
-            <form onSubmit={handleSubmit} className="space-y-4 text-xs sm:text-sm">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block font-bold text-slate-700 uppercase tracking-wider text-[11px] mb-1.5">
-                    Hospital / Centre Name *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={hospitalName}
-                    onChange={(e) => setHospitalName(e.target.value)}
-                    placeholder="e.g. Anandrishiji Blood Centre"
-                    className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#B91C32] focus:bg-white"
-                  />
+            <form onSubmit={handleSubmit} className="space-y-6 text-xs sm:text-sm">
+              {/* Step 1: Institutional Credentials */}
+              <div className="space-y-4">
+                <div className="flex items-center gap-2 pb-2 border-b border-slate-100">
+                  <span className="w-5 h-5 rounded-full bg-slate-800 text-white font-bold text-[10px] flex items-center justify-center">1</span>
+                  <h3 className="font-bold text-slate-800 text-sm">Institutional &amp; Regulatory Credentials</h3>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block font-bold text-slate-700 uppercase tracking-wider text-[11px] mb-1.5">
+                      Hospital / Centre Name *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={hospitalName}
+                      onChange={(e) => setHospitalName(e.target.value)}
+                      placeholder="e.g. Anandrishiji Blood Centre"
+                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#B91C32] focus:bg-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-slate-700 uppercase tracking-wider text-[11px] mb-1.5">
+                      Drugs Control License No. *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={licenseNumber}
+                      onChange={(e) => setLicenseNumber(e.target.value)}
+                      placeholder="e.g. MH/BLD/2021/04"
+                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#B91C32] focus:bg-white"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block font-bold text-slate-700 uppercase tracking-wider text-[11px] mb-1.5">
+                      District
+                    </label>
+                    <select
+                      value={district}
+                      onChange={(e) => setDistrict(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#B91C32] focus:bg-white"
+                    >
+                      {districts.map((d) => (
+                        <option key={d.code} value={d.name}>
+                          {d.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-slate-700 uppercase tracking-wider text-[11px] mb-1.5">
+                      Medical Officer in Charge *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={contactPerson}
+                      onChange={(e) => setContactPerson(e.target.value)}
+                      placeholder="Dr. Full Name"
+                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#B91C32] focus:bg-white"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block font-bold text-slate-700 uppercase tracking-wider text-[11px] mb-1.5">
+                      Official Centre Email
+                    </label>
+                    <input
+                      type="email"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="bloodbank@hospital.org"
+                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#B91C32] focus:bg-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-slate-700 uppercase tracking-wider text-[11px] mb-1.5">
+                      Verified Phone Number *
+                    </label>
+                    <input
+                      type="tel"
+                      required
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value)}
+                      placeholder="Landline or official mobile"
+                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#B91C32] focus:bg-white"
+                    />
+                  </div>
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-700 uppercase tracking-wider text-[11px] mb-1.5">
-                    Drugs Control License No. *
+                  <label className="block font-bold text-slate-700 uppercase tracking-wider text-[11px] mb-2">
+                    Licensed Components Handled
                   </label>
-                  <input
-                    type="text"
-                    required
-                    value={licenseNumber}
-                    onChange={(e) => setLicenseNumber(e.target.value)}
-                    placeholder="e.g. MH/BLD/2021/04"
-                    className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#B91C32] focus:bg-white"
-                  />
+                  <div className="flex flex-wrap gap-2">
+                    {['Packed Red Blood Cells', 'Whole Blood', 'Platelet Concentrate', 'Fresh Frozen Plasma'].map(
+                      (comp) => {
+                        const selected = componentTypes.includes(comp);
+                        return (
+                          <button
+                            key={comp}
+                            type="button"
+                            onClick={() => toggleComponent(comp)}
+                            className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                              selected
+                                ? 'bg-[#B91C32] text-white shadow-2xs'
+                                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                            }`}
+                          >
+                            {selected ? '✓ ' : '+ '}
+                            {comp}
+                          </button>
+                        );
+                      }
+                    )}
+                  </div>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block font-bold text-slate-700 uppercase tracking-wider text-[11px] mb-1.5">
-                    District
-                  </label>
-                  <select
-                    value={district}
-                    onChange={(e) => setDistrict(e.target.value)}
-                    className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#B91C32] focus:bg-white"
-                  >
-                    {districts.map((d) => (
-                      <option key={d.code} value={d.name}>
-                        {d.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block font-bold text-slate-700 uppercase tracking-wider text-[11px] mb-1.5">
-                    Medical Officer in Charge *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={contactPerson}
-                    onChange={(e) => setContactPerson(e.target.value)}
-                    placeholder="Dr. Full Name"
-                    className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#B91C32] focus:bg-white"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block font-bold text-slate-700 uppercase tracking-wider text-[11px] mb-1.5">
-                    Official Centre Email
-                  </label>
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="bloodbank@hospital.org"
-                    className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#B91C32] focus:bg-white"
-                  />
-                </div>
-
-                <div>
-                  <label className="block font-bold text-slate-700 uppercase tracking-wider text-[11px] mb-1.5">
-                    Verified Phone Number *
-                  </label>
-                  <input
-                    type="tel"
-                    required
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
-                    placeholder="Landline or official mobile"
-                    className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#B91C32] focus:bg-white"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block font-bold text-slate-700 uppercase tracking-wider text-[11px] mb-2">
-                  Licensed Components Handled
-                </label>
-                <div className="flex flex-wrap gap-2">
-                  {['Packed Red Blood Cells', 'Whole Blood', 'Platelet Concentrate', 'Fresh Frozen Plasma'].map(
-                    (comp) => {
-                      const selected = componentTypes.includes(comp);
-                      return (
-                        <button
-                          key={comp}
-                          type="button"
-                          onClick={() => toggleComponent(comp)}
-                          className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
-                            selected
-                              ? 'bg-[#B91C32] text-white shadow-2xs'
-                              : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                          }`}
-                        >
-                          {selected ? '✓ ' : '+ '}
-                          {comp}
-                        </button>
-                      );
-                    }
+              {/* Step 2: Facility Entrance Location Confirmation */}
+              <div className="space-y-3 pt-4 border-t border-slate-200">
+                <div className="flex items-center justify-between pb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-slate-800 text-white font-bold text-[10px] flex items-center justify-center">2</span>
+                    <h3 className="font-bold text-slate-800 text-sm">Facility Entrance &amp; Donor Reception Location *</h3>
+                  </div>
+                  {confirmedLocation && (
+                    <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+                      ✓ Location Confirmed
+                    </span>
                   )}
                 </div>
+
+                <BloodBankLocationPicker
+                  districtName={district}
+                  initialAddress={confirmedLocation?.address || ''}
+                  onLocationConfirmed={handleLocationConfirmed}
+                  confirmButtonLabel={confirmedLocation ? 'Update Confirmed Location' : 'Confirm Blood Bank Location'}
+                />
+
+                {confirmedLocation && (
+                  <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 flex items-center justify-between">
+                    <div>
+                      <span className="font-bold">Verified Entrance Coordinates: </span>
+                      <span className="font-mono">{confirmedLocation.latitude.toFixed(6)}° N, {confirmedLocation.longitude.toFixed(6)}° E</span>
+                    </div>
+                    <span className="text-[10px] bg-emerald-200/60 font-bold px-2 py-0.5 rounded">Ready to Submit</span>
+                  </div>
+                )}
               </div>
 
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full py-3.5 rounded-xl bg-[#B91C32] hover:bg-[#9B1324] disabled:bg-slate-400 text-white font-bold text-xs sm:text-sm shadow-xs transition-all cursor-pointer mt-4"
-              >
-                {loading ? 'Submitting Application...' : 'Submit Blood Bank Registration Application'}
-              </button>
+              {/* Final Submit Button */}
+              <div className="pt-4">
+                <button
+                  type="submit"
+                  disabled={loading || !confirmedLocation}
+                  className="w-full py-3.5 rounded-xl bg-[#B91C32] hover:bg-[#9B1324] disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-bold text-xs sm:text-sm shadow-xs transition-all cursor-pointer"
+                >
+                  {loading
+                    ? 'Submitting Application...'
+                    : !confirmedLocation
+                    ? 'Please Confirm Location on Map Above to Continue'
+                    : 'Submit Blood Bank Registration Application'}
+                </button>
+              </div>
             </form>
           )}
         </div>

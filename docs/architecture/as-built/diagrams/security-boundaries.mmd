@@ -1,0 +1,33 @@
+flowchart TD
+    classDef boundaryStyle fill:#fef2f2,stroke:#ef4444,stroke-width:2px,color:#991b1b;
+    classDef gateStyle fill:#1e40af,stroke:#1e3a8a,color:#ffffff;
+    classDef authStyle fill:#047857,stroke:#065f46,color:#ffffff;
+
+    subgraph Perimeter ["1. Public Network Perimeter"]
+        PublicRequests["Unauthenticated Requests\n(Search Directory, Register Org, Login OTP)"]
+    end
+
+    subgraph AuthGateway ["2. Identity Verification & Token Gate"]
+        OTPAuth["demo-login / OTP Endpoint\nGenerates Signed JWT (sub, phone, role)"]:::authStyle
+        RequireAuth["requireAuth Middleware\nVerifies JWT Signature & Expiry"]:::authStyle
+    end
+
+    subgraph RBACEnforcement ["3. RBAC & Organization Isolation Gate"]
+        RequireOrg["requireOrgPermission(permission)\n- Verifies User belongs to Organisation\n- Verifies Role has required Permission"]:::gateStyle
+        SysAdminGuard["requireRole('ADMIN')\n- Verifies caller has platform-level ADMIN role"]:::gateStyle
+    end
+
+    subgraph PrivacyIsolation ["4. Clinical & Privacy Boundaries"]
+        DonorPrivacy["Donor Identity Masking\nPhone & GPS hidden unless explicit consent"]:::boundaryStyle
+        BankIsolation["Multi-Tenant Isolation\nBank A cannot see Bank B's stock or candidates"]:::boundaryStyle
+        ClinicalSafety["Clinical Decision Authority\nOnly CLINICAL_STAFF can clear or release units"]:::boundaryStyle
+    end
+
+    PublicRequests --> OTPAuth --> RequireAuth
+    RequireAuth --> RequireOrg
+    RequireAuth --> SysAdminGuard
+
+    RequireOrg --> BankIsolation
+    RequireOrg --> ClinicalSafety
+    SysAdminGuard --> DonorPrivacy
+

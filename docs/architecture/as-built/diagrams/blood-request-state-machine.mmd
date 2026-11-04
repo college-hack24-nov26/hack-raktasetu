@@ -1,0 +1,38 @@
+stateDiagram-v2
+    [*] --> OPEN: Patient Submits Request
+
+    state OPEN {
+        [*] --> ROUTED_TO_BANK: Canonical Designation Set
+        ROUTED_TO_BANK --> EVALUATING_INVENTORY: Blood Bank Opens Request
+        
+        state EVALUATING_INVENTORY {
+            [*] --> FULLY_ALLOCATED: Released Stock >= Requested Units
+            [*] --> SHORTFALL_DETECTED: Released Stock < Requested Units
+        }
+
+        SHORTFALL_DETECTED --> MATCHING_REQUESTED: Blood Bank Requests Matching
+        
+        state MATCHING_LIFECYCLE {
+            MATCHING_REQUESTED --> SEARCH_RUNNING: Admin Triggers Algorithm
+            SEARCH_RUNNING --> CANDIDATES_FOUND: Eligible Candidates Identified
+            SEARCH_RUNNING --> NO_CANDIDATES: Zero Matches in Scope
+            CANDIDATES_FOUND --> RELEASED: Admin Approves & Releases List
+            RELEASED --> OUTREACH_ACTIVE: Blood Bank Invites Donors
+            OUTREACH_ACTIVE --> DONOR_ARRIVED: Donor Accepts & Arrives
+            DONOR_ARRIVED --> CLINICAL_PROCESSING: Intake, Bleed, Lab Tests
+            CLINICAL_PROCESSING --> UNIT_RELEASED: MO Signs Clinical Release
+        }
+
+        UNIT_RELEASED --> FULLY_ALLOCATED: Inventory Reserved
+        FULLY_ALLOCATED --> DISPATCH_PREPARED: Issue Order Generated
+        DISPATCH_PREPARED --> IN_TRANSIT: Handover Manifest Dispatched
+        IN_TRANSIT --> DELIVERED_TO_HOSPITAL: Hospital Staff Confirms Intake
+    }
+
+    DELIVERED_TO_HOSPITAL --> CLOSED: Patient Acknowledges Receipt
+    OPEN --> CANCELLED: Requester or Admin Cancels
+    OPEN --> EXPIRED: Validity Window Elapsed
+    CLOSED --> [*]
+    CANCELLED --> [*]
+    EXPIRED --> [*]
+

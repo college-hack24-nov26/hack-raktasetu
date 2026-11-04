@@ -210,6 +210,12 @@ export class ProcessingAndInventoryService {
           instrumentId: input.instrumentId?.trim() || null,
           notes: input.notes?.trim() || null,
         },
+        include: {
+          performedBy: { select: { id: true, name: true, role: true } },
+          verifiedBy: { select: { id: true, name: true, role: true } },
+          collectionUnit: { select: { id: true, unitNumber: true, bloodGroup: true, volumeMl: true } },
+          componentUnit: { select: { id: true, componentCode: true, componentType: true, bloodGroup: true } },
+        },
       });
 
       // If test is REACTIVE, CONFIRMED_POSITIVE, or INDETERMINATE, immediately place component on safety quarantine hold
@@ -266,11 +272,42 @@ export class ProcessingAndInventoryService {
               reason: `Safety Quarantine: Reactive lab test result recorded for ${input.testType}`,
             },
           });
+
+          // Cascade safety quarantine hold to any child components derived from this collection bag
+          const derivedComps = await tx.componentUnit.findMany({
+            where: {
+              collectionUnitId: collectionUnit.id,
+              status: { notIn: ['DISCARDED'] },
+            },
+          });
+          for (const derived of derivedComps) {
+            await tx.componentUnit.update({
+              where: { id: derived.id },
+              data: {
+                status: 'QUARANTINED',
+                isHold: true,
+                holdReason: `Mandatory safety hold: Reactive pilot test on parent bag ${collectionUnit.unitNumber} (${input.testType})`,
+                holdPlacedAt: new Date(),
+                holdPlacedById: caller.id,
+              },
+            });
+            await tx.unitStatusHistory.create({
+              data: {
+                unitType: 'COMPONENT_UNIT',
+                componentUnitId: derived.id,
+                fromStatus: derived.status,
+                toStatus: 'QUARANTINED',
+                actorUserId: caller.id,
+                organisationId,
+                reason: `Safety Quarantine: Reactive pilot test on parent bag for ${input.testType}`,
+              },
+            });
+          }
         }
       }
 
       return record;
-    });
+    }, { timeout: 20000, maxWait: 10000 });
 
     await prisma.auditLog.create({
       data: {
@@ -327,7 +364,10 @@ export class ProcessingAndInventoryService {
         status: record.status === 'PENDING' ? 'COMPLETED' : record.status,
       },
       include: {
+        performedBy: { select: { id: true, name: true, role: true } },
         verifiedBy: { select: { id: true, name: true, role: true } },
+        collectionUnit: { select: { id: true, unitNumber: true, bloodGroup: true, volumeMl: true } },
+        componentUnit: { select: { id: true, componentCode: true, componentType: true, bloodGroup: true } },
       },
     });
 
@@ -359,15 +399,36 @@ export class ProcessingAndInventoryService {
   ) {
     await this.verifyOrgMembership(organisationId, caller);
 
+    let parentCollectionUnitId = filter.collectionUnitId;
+    if (filter.componentUnitId && !parentCollectionUnitId) {
+      const comp = await prisma.componentUnit.findUnique({
+        where: { id: filter.componentUnitId },
+        select: { collectionUnitId: true },
+      });
+      if (comp?.collectionUnitId) {
+        parentCollectionUnitId = comp.collectionUnitId;
+      }
+    }
+
+    const whereClause: any = { organisationId };
+    if (filter.componentUnitId && parentCollectionUnitId) {
+      whereClause.OR = [
+        { componentUnitId: filter.componentUnitId },
+        { collectionUnitId: parentCollectionUnitId },
+      ];
+    } else if (filter.componentUnitId) {
+      whereClause.componentUnitId = filter.componentUnitId;
+    } else if (filter.collectionUnitId) {
+      whereClause.collectionUnitId = filter.collectionUnitId;
+    }
+
     return prisma.laboratoryTestRecord.findMany({
-      where: {
-        organisationId,
-        ...(filter.collectionUnitId ? { collectionUnitId: filter.collectionUnitId } : {}),
-        ...(filter.componentUnitId ? { componentUnitId: filter.componentUnitId } : {}),
-      },
+      where: whereClause,
       include: {
         performedBy: { select: { id: true, name: true, role: true } },
         verifiedBy: { select: { id: true, name: true, role: true } },
+        collectionUnit: { select: { id: true, unitNumber: true, bloodGroup: true, volumeMl: true } },
+        componentUnit: { select: { id: true, componentCode: true, componentType: true, bloodGroup: true } },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -415,7 +476,14 @@ export class ProcessingAndInventoryService {
     const missingTests: TestType[] = [];
     const pendingTests: TestType[] = [];
     const reactiveOrFailedTests: { testType: TestType; outcome: TestResultOutcome | null }[] = [];
-    const passedTests: { testType: TestType; outcome: TestResultOutcome; recordId: string }[] = [];
+    const passedTests: {
+      testType: TestType;
+      outcome: TestResultOutcome;
+      recordId: string;
+      verified?: boolean;
+      verifiedAt?: Date | null;
+      isPilotTest?: boolean;
+    }[] = [];
 
     // Configurable facility-approved panel vs application baseline panel
     const facilityPanel = (comp.metadata as any)?.facilityApprovedPanel;
@@ -453,7 +521,14 @@ export class ProcessingAndInventoryService {
         ) {
           reactiveOrFailedTests.push({ testType: required, outcome: rec.resultOutcome });
         } else {
-          passedTests.push({ testType: required, outcome: rec.resultOutcome, recordId: rec.id });
+          passedTests.push({
+            testType: required,
+            outcome: rec.resultOutcome,
+            recordId: rec.id,
+            verified: Boolean(rec.verifiedAt),
+            verifiedAt: rec.verifiedAt,
+            isPilotTest: Boolean(rec.collectionUnitId === comp.collectionUnitId && !rec.componentUnitId),
+          });
         }
       } else {
         // Unapproved outcome or non-completed status fail safely
@@ -663,6 +738,25 @@ export class ProcessingAndInventoryService {
                 dispositionedById: caller.id,
               }
             : {}),
+        },
+        include: {
+          storageLocation: {
+            select: {
+              id: true,
+              name: true,
+              locationCode: true,
+              storageType: true,
+              targetTempRange: true,
+            },
+          },
+          collectionUnit: {
+            select: {
+              id: true,
+              unitNumber: true,
+              collectedAt: true,
+              campId: true,
+            },
+          },
         },
       });
 
@@ -1049,6 +1143,25 @@ export class ProcessingAndInventoryService {
               }
             : {}),
         },
+        include: {
+          storageLocation: {
+            select: {
+              id: true,
+              name: true,
+              locationCode: true,
+              storageType: true,
+              targetTempRange: true,
+            },
+          },
+          collectionUnit: {
+            select: {
+              id: true,
+              unitNumber: true,
+              collectedAt: true,
+              campId: true,
+            },
+          },
+        },
       });
 
       if (isExcursion) {
@@ -1096,7 +1209,7 @@ export class ProcessingAndInventoryService {
       }
 
       return { movement, component: updatedComp };
-    });
+    }, { timeout: 20000, maxWait: 10000 });
 
     await prisma.auditLog.create({
       data: {
@@ -1267,6 +1380,25 @@ export class ProcessingAndInventoryService {
           dispositionedById: caller.id,
           notes: input.notes ? input.notes.trim() : comp.notes,
         },
+        include: {
+          storageLocation: {
+            select: {
+              id: true,
+              name: true,
+              locationCode: true,
+              storageType: true,
+              targetTempRange: true,
+            },
+          },
+          collectionUnit: {
+            select: {
+              id: true,
+              unitNumber: true,
+              collectedAt: true,
+              campId: true,
+            },
+          },
+        },
       });
 
       await tx.unitStatusHistory.create({
@@ -1310,7 +1442,7 @@ export class ProcessingAndInventoryService {
       });
 
       return compUpdate;
-    });
+    }, { timeout: 20000, maxWait: 10000 });
 
     await prisma.auditLog.create({
       data: {
